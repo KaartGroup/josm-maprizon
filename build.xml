@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<project name="KaartViewer" default="dist" basedir=".">
+
+    <!-- enter the SVN commit message -->
+    <property name="commit.message" value="JOSM plugin for Kaart Viewer street-level imagery coverage"/>
+    <!-- enter the *lowest* JOSM version this plugin is currently compatible with -->
+    <property name="plugin.main.version" value="18000"/>
+
+    <!-- Configure these properties (replace "..." accordingly).
+         See https://josm.openstreetmap.de/wiki/DevelopersGuide/DevelopingPlugins
+         These duplicate plugin.properties (see build-common.xml note) - keep in sync by hand.
+    -->
+    <property name="plugin.author" value="Kaart"/>
+    <property name="plugin.class" value="org.openstreetmap.josm.plugins.kaartviewer.KaartViewerPlugin"/>
+    <property name="plugin.description" value="Shows Kaart Viewer street-level imagery coverage in JOSM, with one-click open-in-browser"/>
+    <property name="plugin.icon" value="images/kaartviewer.png"/>
+    <property name="plugin.link" value=""/>
+    <!-- No plugin.requires: unlike CR_PLUGIN, this plugin has no dependency on another JOSM plugin. -->
+
+    <!-- ** include targets that all plugins have in common ** -->
+    <import file="build-common.xml"/>
+
+    <property name="josm" location="lib/josm-custom.jar"/>
+    <property name="plugin.dist.dir" value="dist"/>
+
+    <!-- classpath for compiling -->
+    <path id="classpath">
+        <pathelement location="${josm}"/>
+        <fileset dir="lib">
+            <include name="**/*.jar"/>
+        </fileset>
+    </path>
+
+    <!-- third-party runtime dependency jars that must be bundled INTO the plugin
+         jar (there is no maven/gradle shade plugin available under plain Ant, so
+         we unpack their classes directly into build/classes before jarring).
+         josm-custom.jar itself is excluded: JOSM provides those classes at
+         runtime and bundling them would be both wasteful and wrong. -->
+    <fileset id="bundled.deps" dir="lib">
+        <include name="**/*.jar"/>
+        <exclude name="josm-custom.jar"/>
+    </fileset>
+
+    <target name="init">
+        <mkdir dir="${plugin.build.dir}"/>
+        <mkdir dir="dist"/>
+    </target>
+
+    <target name="compile" depends="init">
+        <echo message="compiling sources for ${plugin.jar} ..."/>
+        <javac srcdir="src" debug="true" destdir="${plugin.build.dir}" includeantruntime="false"
+               encoding="UTF-8" source="1.8" target="1.8">
+            <classpath refid="classpath"/>
+            <compilerarg value="-Xlint:deprecation"/>
+            <compilerarg value="-Xlint:unchecked"/>
+        </javac>
+    </target>
+
+    <target name="bundle-deps">
+        <echo message="unpacking bundled dependency jars into ${plugin.build.dir} ..."/>
+        <unzip dest="${plugin.build.dir}">
+            <fileset refid="bundled.deps"/>
+            <patternset>
+                <exclude name="META-INF/**"/>
+            </patternset>
+        </unzip>
+    </target>
+
+    <target name="dist" depends="compile,bundle-deps,revision">
+        <echo message="creating ${ant.project.name}.jar ..."/>
+        <copy todir="${plugin.build.dir}/images">
+            <fileset dir="images"/>
+        </copy>
+        <jar destfile="${plugin.jar}" basedir="${plugin.build.dir}" manifestencoding="UTF-8">
+            <manifest>
+                <attribute name="Author" value="${plugin.author}"/>
+                <attribute name="Plugin-Class" value="${plugin.class}"/>
+                <attribute name="Plugin-Date" value="${version.entry.commit.date}"/>
+                <attribute name="Plugin-Description" value="${plugin.description}"/>
+                <attribute name="Plugin-Icon" value="${plugin.icon}"/>
+                <attribute name="Plugin-Link" value="${plugin.link}"/>
+                <attribute name="Plugin-Mainversion" value="${plugin.main.version}"/>
+                <attribute name="Plugin-Version" value="${version.entry.commit.revision}"/>
+            </manifest>
+        </jar>
+    </target>
+
+    <target name="install" depends="dist">
+        <property environment="env"/>
+        <condition property="josm.plugins.dir" value="${env.APPDATA}/JOSM/plugins">
+            <and>
+                <os family="windows"/>
+            </and>
+        </condition>
+        <condition property="josm.plugins.dir" value="${user.home}/Library/JOSM/plugins">
+            <and>
+                <os family="mac"/>
+            </and>
+        </condition>
+        <property name="josm.plugins.dir" value="${user.home}/.josm/plugins"/>
+        <mkdir dir="${josm.plugins.dir}"/>
+        <copy file="${plugin.jar}" todir="${josm.plugins.dir}"/>
+    </target>
+
+    <target name="clean" depends="clean-common">
+        <delete dir="${plugin.build.dir}"/>
+        <delete file="${plugin.jar}"/>
+    </target>
+
+</project>

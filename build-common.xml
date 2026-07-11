@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<project name="build-common">
+
+    <!-- Plugin build properties -->
+    <property name="plugin.build.dir" value="build/classes"/>
+    <property name="plugin.src.dir" value="src"/>
+    <property name="plugin.jar" value="${ant.project.name}.jar"/>
+    <property name="plugin.dist.dir" value="dist"/>
+
+    <!-- Version and revision handling -->
+    <target name="revision">
+        <!-- Generate a simple timestamp-based revision -->
+        <tstamp>
+            <format property="version.entry.commit.date" pattern="yyyy-MM-dd HH:mm:ss"/>
+            <format property="version.entry.commit.revision" pattern="yyyyMMdd-HHmmss"/>
+        </tstamp>
+    </target>
+
+    <!-- Common clean target -->
+    <target name="clean-common">
+        <delete dir="${plugin.build.dir}"/>
+        <delete dir="${plugin.dist.dir}"/>
+    </target>
+
+</project>

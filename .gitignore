@@ -1,0 +1,6 @@
+build/
+dist/
+*.jar
+!lib/*.jar
+testbed/out/
+*.class
