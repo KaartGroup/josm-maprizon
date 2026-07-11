@@ -8,8 +8,20 @@ image in a browser.
 ## Phase 1 scope
 
 - A toggleable `MaprizonLayer` (Tools menu -> "Maprizon Coverage", or
-  `Alt+Shift+K`) that fetches and renders public per-facing PMTiles coverage
-  around the current map view.
+  `Alt+Shift+K`) that adds/removes an initially empty coverage layer. Toggling
+  the layer no longer auto-dumps coverage; you download coverage into it
+  explicitly (see next bullet).
+- Coverage is downloaded **explicitly and scoped to the current view**,
+  JOSM-style, via **Tools menu -> "Download Maprizon coverage (current view)"**
+  (shortcut **`Alt+Shift+D`**) or the layer's right-click menu ->
+  "Download Maprizon coverage in current view". Downloads **accumulate** -
+  fetching a new area adds to what's already shown (tiles already fetched are
+  skipped), the way OSM data grows as you download more; the layer menu's
+  "Clear downloaded coverage" resets it. The tile zoom is chosen to match the
+  on-screen resolution (zoomed in -> per-image detail at z16; zoomed out ->
+  generalized sequence lines), clamped to the archive's zoom range (z2-z16).
+  "Auto-refresh on pan" is **OFF by default**; a layer-menu toggle re-enables a
+  live mode that re-downloads around the view as it changes.
 - Coverage is colored by facing (see "Color choices" below) and can be shown
   or hidden per facing from the layer's right-click menu.
 - Right-click on the layer in the Layers panel -> "View in Maprizon" opens
@@ -29,7 +41,7 @@ image in a browser.
 - **Private-org coverage support**: only the *public* per-facing PMTiles files
   are read. Private/org-restricted imagery is not supported in Phase 1 (no
   auth flow exists in this plugin).
-- Viewport-driven incremental tile loading is present but intentionally
+- On-demand, view-scoped coverage download is present but intentionally
   simple (see "Known limitations" below) - it is not a full vector-tile
   rendering engine.
 
@@ -59,11 +71,14 @@ src/org/openstreetmap/josm/plugins/maprizon/
   MaprizonPlugin.java          - main plugin class (org.openstreetmap.josm.plugins.Plugin)
   FacingStyle.java                - per-facing PMTiles URLs + colors + deep-link facing whitelist
   actions/
-    ToggleMaprizonLayerAction.java  - JosmAction, adds/removes the layer
+    ToggleMaprizonLayerAction.java  - JosmAction, adds/removes the (empty) layer
+    DownloadMaprizonCoverageAction.java - JosmAction, explicit view-scoped
+                                          coverage download (Alt+Shift+D)
   data/
     ImageryFeature.java           - one decoded coverage feature + its Viewer properties
   layer/
-    MaprizonLayer.java         - the map layer: fetch/cache/render/context-menu/deep-link
+    MaprizonLayer.java         - the map layer: explicit view-scoped download +
+                                 accumulation/render/context-menu/deep-link
   pmtiles/
     TileMath.java                 - slippy-map tile <-> lon/lat math (incl. MVT local-coord conversion)
     PmtilesTileLoader.java        - real PMTiles fetch + MVT decode (see "PMTiles/MVT decoding" below)
@@ -212,15 +227,26 @@ other field is still included normally).
 
 ## Known limitations / honest gaps (read before relying on this for real work)
 
-- **Viewport tile loading is intentionally simple.** On each `paint()` call,
-  if the current view has moved outside the last-loaded (padded) bounds, a
-  background reload is triggered for all enabled facings. Zoom level is
-  picked heuristically (targeting roughly 6 tiles across the view, clamped to
-  the archive's actual min/max zoom), and the tile fetch count is capped at
-  48 tiles per facing per refresh. This is a real, working strategy, but it
-  is not a production-grade vector tile renderer (no tile-level caching
-  across zoom changes, no partial/incremental redraw, no cancellation of an
-  in-flight load if the view moves again mid-fetch).
+- **Coverage download is on-demand and intentionally simple.** Coverage is
+  fetched only when you explicitly ask for it (Tools -> "Download Maprizon
+  coverage (current view)" / `Alt+Shift+D`, or the layer menu's
+  "Download Maprizon coverage in current view"), scoped to the current view.
+  The tile zoom is chosen to **match the on-screen resolution** (zoomed in ->
+  per-image detail at z16; zoomed out -> generalized sequence lines), clamped
+  to the archive's actual min/max zoom (z2-z16) - replacing the old
+  "~6 tiles across" heuristic and coarsen-to-min-zoom loop that could collapse
+  to world zoom. Downloads **accumulate**: a new download adds to what's
+  already loaded and tiles already fetched are skipped (the layer menu's
+  "Clear downloaded coverage" resets everything). There is an **"area too
+  large" guard** - if the current view would need more than 256 new tiles
+  (summed across enabled facings) the download is refused with a prompt to
+  zoom in and try again, instead of coarsening; 256 is a tunable cap.
+  "Auto-refresh on pan" is **OFF by default**; a layer-menu toggle re-enables
+  a live mode that re-downloads around the view as it changes, using the same
+  scoped-download path. This is a real, working strategy, but it is not a
+  production-grade vector tile renderer (no tile-level caching across zoom
+  changes, no partial/incremental redraw, no cancellation of an in-flight
+  load if the view moves again mid-fetch).
 - **Nearest-point search for "View in Maprizon"** is a simple linear scan
   over currently-loaded, currently-enabled features using planar (not
   geodesic) distance - fine at city scale, not exact at large view extents.

@@ -23,7 +23,6 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
-import java.awt.Color;
 import java.awt.Desktop;
 import java.awt.Graphics2D;
 import java.awt.Point;
@@ -35,10 +34,14 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,16 +50,35 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * JOSM map layer showing Maprizon street-level imagery sequence coverage,
  * colored by camera facing, fetched from the public per-facing PMTiles files.
  *
- * Phase 1 scope: read-only coverage display + "View in Maprizon" deep link
- * for the nearest feature to the last map click. See this repo's README for
- * what is explicitly NOT built yet (reverse sync, changeset attribution,
- * private-org coverage).
+ * <p>Coverage is fetched the way JOSM's own OSM data is: <b>scoped to the
+ * current view and downloaded on demand</b> (Layer menu / toolbar
+ * "Download Maprizon coverage in current view"), at the slippy zoom that
+ * matches the on-screen resolution, and <b>accumulated</b> across downloads.
+ * There is an opt-in "Auto-refresh on pan" mode for a live feel, but it is off
+ * by default so the layer never silently dumps world-scale geometry.
+ *
+ * <p>Phase 1 scope: read-only coverage display + "View in Maprizon" deep link
+ * for the nearest feature to the last map click. See the README for what is
+ * explicitly NOT built yet (reverse sync, changeset attribution, private-org
+ * coverage).
  */
 public class MaprizonLayer extends Layer implements MouseListener {
 
-    /** Cap on tiles fetched per refresh, to keep a single refresh cheap/bounded. */
-    private static final int MAX_TILES_PER_FACING = 48;
-    private static final int TARGET_TILES_ACROSS = 6;
+    /**
+     * Safety cap on the number of NEW tiles a single explicit download will
+     * fetch (summed across enabled facings). Beyond this the user is asked to
+     * zoom in, mirroring JOSM's "download area too large" guard — we never
+     * coarsen to world zoom to fit. Because the zoom is screen-matched, one
+     * viewport is ~ (screenW/256)·(screenH/256) tiles PER facing regardless of
+     * geographic scale, so a 4K screen across all 5 facings is ~600 tiles; 1024
+     * comfortably allows a full hi-DPI view while still catching pathological
+     * requests. Tunable.
+     */
+    private static final int MAX_TILES_PER_DOWNLOAD = 1024;
+
+    /** Archive zoom fallbacks if a reader header can't be read. */
+    private static final int FALLBACK_MIN_ZOOM = 2;
+    private static final int FALLBACK_MAX_ZOOM = 16;
 
     private final PmtilesTileLoader loader = new PmtilesTileLoader();
     private final ExecutorService loadExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -65,13 +87,36 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return t;
     });
 
-    private final Set<String> enabledFacings = new LinkedHashSet<>(FacingStyle.ALL_FACINGS);
+    /** Thread-safe: read on the loader thread during a download, mutated on the
+     * EDT by the Hide/Show menu actions. Iteration order is not relied on
+     * (ordered iteration always uses FacingStyle.ALL_FACINGS + contains). */
+    private final Set<String> enabledFacings = ConcurrentHashMap.newKeySet();
 
-    /** facing -> features currently cached/rendered. Replaced wholesale after each successful load. */
-    private volatile java.util.Map<String, List<ImageryFeature>> featuresByFacing = new java.util.HashMap<>();
+    /** Archive zoom range, cached so screenZoom() never blocks on a reader-header
+     * HTTP read (it is called from paint() on the EDT in auto-refresh mode).
+     * Seeded with the fallback range and refreshed on the loader thread. */
+    private volatile int archiveMinZoomCached = FALLBACK_MIN_ZOOM;
+    private volatile int archiveMaxZoomCached = FALLBACK_MAX_ZOOM;
+    private volatile boolean zoomBoundsResolved = false;
+
+    /**
+     * facing -> accumulated features currently rendered. Mutated only on the EDT
+     * (in {@link #merge}); {@code volatile} so the loader thread sees a stable
+     * reference when planning. Downloads ADD to this (accumulate), matching how
+     * JOSM data layers grow as you download more areas.
+     */
+    private volatile Map<String, List<ImageryFeature>> featuresByFacing = new HashMap<>();
+
+    /** Tiles already fetched (key = facing/z/x/y), so re-downloading an overlapping
+     * area skips work. Concurrent: read on the loader thread, added on the EDT. */
+    private final Set<String> loadedTileKeys = ConcurrentHashMap.newKeySet();
 
     private final AtomicBoolean loading = new AtomicBoolean(false);
-    private volatile Bounds lastLoadedBounds;
+
+    /** Opt-in live behavior: re-download around the view as it changes. Off by default. */
+    private volatile boolean autoRefresh = false;
+    private volatile Bounds lastAutoBounds;
+    private volatile int lastAutoZoom = -1;
 
     private LatLon lastClickLatLon;
     private ImageryFeature lastNearestFeature;
@@ -79,6 +124,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     public MaprizonLayer() {
         super("Maprizon Coverage");
+        enabledFacings.addAll(FacingStyle.ALL_FACINGS);
     }
 
     @Override
@@ -87,7 +133,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
         if (map != null && map.mapView != null) {
             map.mapView.addMouseListener(this);
         }
-        triggerLoad(true);
+        // No auto-download on add: coverage is fetched explicitly (see
+        // downloadCurrentView), so adding the layer never dumps world geometry.
     }
 
     @Override
@@ -105,11 +152,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     @Override
     public void paint(Graphics2D g, MapView mv, Bounds bbox) {
-        if (!loading.get() && needsReload(bbox)) {
-            triggerLoad(false);
+        // Live mode only: opt-in re-download when the view has meaningfully moved
+        // or zoomed. Uses the SAME fetch path as an explicit download, just
+        // without the area-too-large prompt.
+        if (autoRefresh && !loading.get() && autoViewChanged(bbox, mv)) {
+            submitDownload(bbox, mv.getWidth(), false, false);
         }
 
-        for (java.util.Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
+        for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
             String facing = entry.getKey();
             if (!enabledFacings.contains(facing)) {
                 continue;
@@ -134,109 +184,234 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
     }
 
-    // ------------------------------------------------------------- loading
+    // ------------------------------------------------------------- download
 
-    private boolean needsReload(Bounds bbox) {
-        Bounds last = lastLoadedBounds;
-        if (last == null) {
-            return true;
-        }
-        // Reload if the view moved/zoomed outside of what we last fetched.
-        return !last.contains(bbox.getMin()) || !last.contains(bbox.getMax());
-    }
-
-    /** Kick off an async reload for the current view. Safe to call from the EDT. */
-    public void triggerLoad(boolean force) {
+    /**
+     * Explicit, JOSM-style scoped download: fetch coverage for the CURRENT view
+     * at the on-screen zoom, enforcing the area-too-large guard. Public so the
+     * DownloadMaprizonCoverageAction / menu can invoke it.
+     */
+    public void downloadCurrentView() {
         MapFrame map = MainApplication.getMap();
         if (map == null || map.mapView == null) {
             return;
         }
-        // Never run two loads concurrently; a forced refresh while one is already
-        // in flight simply lets that in-flight load win (it will pick up the
-        // current bounds itself once it's done, via the next paint() call).
+        MapView mv = map.mapView;
+        submitDownload(mv.getRealBounds(), mv.getWidth(), true, true);
+    }
+
+    /** Drop all downloaded coverage (start fresh). */
+    public void clearCoverage() {
+        loadedTileKeys.clear();
+        featuresByFacing = new HashMap<>();
+        lastAutoBounds = null;
+        lastAutoZoom = -1;
+        invalidate();
+    }
+
+    /**
+     * SSOT fetch path used by BOTH the explicit download and the auto-refresh
+     * mode. Plans the covering tiles for {@code bbox} at the screen-matched zoom
+     * (skipping already-loaded tiles), optionally enforces the tile budget, then
+     * fetches + merges on the background executor.
+     *
+     * @param enforceBudget  true for explicit downloads (prompt if too large);
+     *                       false for auto-refresh (silently bounded by the view).
+     * @param userInitiated  true to surface an empty/too-large result to the user.
+     */
+    private void submitDownload(Bounds bbox, int widthPx, boolean enforceBudget, boolean userInitiated) {
         if (!loading.compareAndSet(false, true)) {
             return;
         }
-        Bounds view = map.mapView.getRealBounds();
-        // Expand slightly so small pans don't immediately re-trigger a reload.
-        double latPad = (view.getMaxLat() - view.getMinLat()) * 0.25;
-        double lonPad = (view.getMaxLon() - view.getMinLon()) * 0.25;
-        Bounds expanded = new Bounds(view);
-        expanded.extend(view.getMinLat() - latPad, view.getMinLon() - lonPad);
-        expanded.extend(view.getMaxLat() + latPad, view.getMaxLon() + lonPad);
-
+        final Bounds view = new Bounds(bbox);
         loadExecutor.submit(() -> {
             try {
-                java.util.Map<String, List<ImageryFeature>> loaded = loadAllFacings(expanded);
+                refreshZoomBounds(); // blocking header read, but on the loader thread
+                int zoom = screenZoom(view, widthPx);
+                Map<String, int[]> rangesByFacing = new LinkedHashMap<>();
+                long totalNewTiles = 0;
+                for (String facing : FacingStyle.ALL_FACINGS) {
+                    if (!enabledFacings.contains(facing)) {
+                        continue;
+                    }
+                    int[] r = tileRange(view, zoom);
+                    rangesByFacing.put(facing, r);
+                    totalNewTiles += countNewTiles(facing, zoom, r);
+                }
+
+                if (enforceBudget && totalNewTiles > MAX_TILES_PER_DOWNLOAD) {
+                    final long tooMany = totalNewTiles;
+                    SwingUtilities.invokeLater(() -> showTooLarge(tooMany));
+                    return;
+                }
+
+                Map<String, List<ImageryFeature>> fetched = new HashMap<>();
+                int newFeatures = 0;
+                for (Map.Entry<String, int[]> e : rangesByFacing.entrySet()) {
+                    String facing = e.getKey();
+                    int[] r = e.getValue();
+                    List<ImageryFeature> acc = new ArrayList<>();
+                    for (int tx = r[0]; tx <= r[1]; tx++) {
+                        for (int ty = r[2]; ty <= r[3]; ty++) {
+                            String key = tileKey(facing, zoom, tx, ty);
+                            if (loadedTileKeys.contains(key)) {
+                                continue;
+                            }
+                            try {
+                                acc.addAll(loader.loadTile(facing, zoom, tx, ty));
+                                // Record as loaded ONLY on success, HERE on the
+                                // loader thread (not deferred to the EDT merge):
+                                // the single-thread executor guarantees this
+                                // download's ledger is complete before the next
+                                // one plans, so overlapping downloads never
+                                // re-fetch or double-count. A tile that threw
+                                // stays absent from the ledger -> retriable.
+                                loadedTileKeys.add(key);
+                            } catch (IOException ioe) {
+                                Logging.warn("Maprizon: tile fetch failed " + key + ": " + ioe.getMessage());
+                            }
+                        }
+                    }
+                    fetched.put(facing, acc);
+                    newFeatures += acc.size();
+                }
+
+                final int added = newFeatures;
                 SwingUtilities.invokeLater(() -> {
-                    featuresByFacing = loaded;
-                    lastLoadedBounds = expanded;
+                    merge(fetched);
                     invalidate();
+                    if (userInitiated && added == 0) {
+                        JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
+                                "No Maprizon coverage found in this view.\n" +
+                                        "Try a different area, or zoom to a place with recent captures.",
+                                "Maprizon", JOptionPane.INFORMATION_MESSAGE);
+                    }
                 });
-            } catch (Exception e) {
-                Logging.warn("Maprizon: coverage load failed: " + e);
+            } catch (Exception ex) {
+                Logging.warn("Maprizon: coverage download failed: " + ex);
             } finally {
                 loading.set(false);
             }
         });
     }
 
-    private java.util.Map<String, List<ImageryFeature>> loadAllFacings(Bounds bounds) {
-        java.util.Map<String, List<ImageryFeature>> result = new java.util.HashMap<>();
-        for (String facing : FacingStyle.ALL_FACINGS) {
-            if (!enabledFacings.contains(facing)) {
-                continue;
-            }
-            try {
-                result.put(facing, loadFacing(facing, bounds));
-            } catch (IOException e) {
-                Logging.warn("Maprizon: failed to load facing '" + facing + "': " + e.getMessage());
-                result.put(facing, java.util.Collections.emptyList());
-            }
+    /** Merge freshly fetched features into the accumulated store. EDT only.
+     * (The tile ledger {@code loadedTileKeys} is updated on the loader thread as
+     * tiles are fetched, not here — see {@link #submitDownload}.) */
+    private void merge(Map<String, List<ImageryFeature>> fetched) {
+        Map<String, List<ImageryFeature>> next = new HashMap<>(featuresByFacing);
+        for (Map.Entry<String, List<ImageryFeature>> e : fetched.entrySet()) {
+            List<ImageryFeature> combined = new ArrayList<>(
+                    next.getOrDefault(e.getKey(), Collections.emptyList()));
+            combined.addAll(e.getValue());
+            next.put(e.getKey(), combined);
         }
-        return result;
+        featuresByFacing = next;
     }
 
-    private List<ImageryFeature> loadFacing(String facing, Bounds bounds) throws IOException {
-        int minZoom = loader.getMinZoom(facing);
-        int maxZoom = loader.getMaxZoom(facing);
-        int zoom = pickZoom(bounds, minZoom, maxZoom);
-
-        int[] min = TileMath.lonLatToTile(bounds.getMinLon(), bounds.getMaxLat(), zoom);
-        int[] max = TileMath.lonLatToTile(bounds.getMaxLon(), bounds.getMinLat(), zoom);
-        int minX = Math.min(min[0], max[0]);
-        int maxX = Math.max(min[0], max[0]);
-        int minY = Math.min(min[1], max[1]);
-        int maxY = Math.max(min[1], max[1]);
-
-        // Coarsen zoom further if the naive tile range is still too big to fetch.
-        while ((long) (maxX - minX + 1) * (maxY - minY + 1) > MAX_TILES_PER_FACING && zoom > minZoom) {
-            zoom--;
-            min = TileMath.lonLatToTile(bounds.getMinLon(), bounds.getMaxLat(), zoom);
-            max = TileMath.lonLatToTile(bounds.getMaxLon(), bounds.getMinLat(), zoom);
-            minX = Math.min(min[0], max[0]);
-            maxX = Math.max(min[0], max[0]);
-            minY = Math.min(min[1], max[1]);
-            maxY = Math.max(min[1], max[1]);
-        }
-
-        List<ImageryFeature> all = new ArrayList<>();
-        int fetched = 0;
-        for (int tx = minX; tx <= maxX; tx++) {
-            for (int ty = minY; ty <= maxY; ty++) {
-                if (fetched++ >= MAX_TILES_PER_FACING) {
-                    break;
+    private long countNewTiles(String facing, int zoom, int[] r) {
+        long n = 0;
+        for (int tx = r[0]; tx <= r[1]; tx++) {
+            for (int ty = r[2]; ty <= r[3]; ty++) {
+                if (!loadedTileKeys.contains(tileKey(facing, zoom, tx, ty))) {
+                    n++;
                 }
-                all.addAll(loader.loadTile(facing, zoom, tx, ty));
             }
         }
-        return all;
+        return n;
     }
 
-    private int pickZoom(Bounds bounds, int minZoom, int maxZoom) {
-        double lonSpan = Math.max(1e-9, bounds.getMaxLon() - bounds.getMinLon());
-        int zoom = (int) Math.round(Math.log(360.0 / lonSpan * TARGET_TILES_ACROSS) / Math.log(2));
-        return Math.max(minZoom, Math.min(maxZoom, zoom));
+    private static String tileKey(String facing, int z, int x, int y) {
+        return facing + "/" + z + "/" + x + "/" + y;
+    }
+
+    /** Tile range [minX,maxX,minY,maxY] covering {@code bbox} at {@code zoom}. */
+    private int[] tileRange(Bounds bounds, int zoom) {
+        int[] a = TileMath.lonLatToTile(bounds.getMinLon(), bounds.getMaxLat(), zoom);
+        int[] b = TileMath.lonLatToTile(bounds.getMaxLon(), bounds.getMinLat(), zoom);
+        return new int[]{
+                Math.min(a[0], b[0]), Math.max(a[0], b[0]),
+                Math.min(a[1], b[1]), Math.max(a[1], b[1])
+        };
+    }
+
+    /**
+     * SSOT zoom selection: the slippy zoom whose tile resolution matches the
+     * current on-screen resolution, clamped to the archive's [min,max]. This
+     * replaces the old "~6 tiles across" heuristic + coarsen-to-minZoom loop that
+     * collapsed to world zoom. At the view's pixel width {@code widthPx} spanning
+     * {@code lonSpan} degrees, a slippy tile is 256px / (360/2^z) degrees, so the
+     * matching zoom is z = log2(widthPx * 360 / (lonSpan * 256)).
+     */
+    private int screenZoom(Bounds view, int widthPx) {
+        double lonSpan = Math.max(1e-9, view.getMaxLon() - view.getMinLon());
+        int px = Math.max(1, widthPx);
+        int z = (int) Math.round(Math.log(px * 360.0 / (lonSpan * 256.0)) / Math.log(2));
+        return Math.max(archiveMinZoom(), Math.min(archiveMaxZoom(), z));
+    }
+
+    // Non-blocking accessors: return the cached range (seeded with the fallback,
+    // refreshed on the loader thread by refreshZoomBounds()). Never do network
+    // I/O here — screenZoom() calls these from paint() on the EDT.
+    private int archiveMinZoom() {
+        return archiveMinZoomCached;
+    }
+
+    private int archiveMaxZoom() {
+        return archiveMaxZoomCached;
+    }
+
+    /** Resolve the archive's real zoom range once, on the loader thread (the
+     * reader-header read is a blocking HTTP range request). Iterates
+     * FacingStyle.ALL_FACINGS (not enabledFacings) since all facings share the
+     * same archive structure and any one gives the range. */
+    private void refreshZoomBounds() {
+        if (zoomBoundsResolved) {
+            return;
+        }
+        for (String facing : FacingStyle.ALL_FACINGS) {
+            try {
+                archiveMinZoomCached = loader.getMinZoom(facing);
+                archiveMaxZoomCached = loader.getMaxZoom(facing);
+                zoomBoundsResolved = true;
+                return;
+            } catch (IOException ignored) {
+                // try next facing; keep the fallback range if none resolve
+            }
+        }
+    }
+
+    /** True when the view moved to a new tile footprint / zoom since the last auto load. */
+    private boolean autoViewChanged(Bounds bbox, MapView mv) {
+        int zoom = screenZoom(bbox, mv.getWidth());
+        Bounds last = lastAutoBounds;
+        boolean changed = last == null || zoom != lastAutoZoom
+                || !last.contains(bbox.getMin()) || !last.contains(bbox.getMax());
+        if (changed) {
+            lastAutoBounds = new Bounds(bbox);
+            lastAutoZoom = zoom;
+        }
+        return changed;
+    }
+
+    private void showTooLarge(long tiles) {
+        JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
+                "This view is too large to download Maprizon coverage in one go\n" +
+                        "(" + tiles + " tiles > " + MAX_TILES_PER_DOWNLOAD + " limit).\n\n" +
+                        "Zoom in further and download again — coverage accumulates across downloads.",
+                "Maprizon: zoom in to download",
+                JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    public boolean isAutoRefresh() {
+        return autoRefresh;
+    }
+
+    public void setAutoRefresh(boolean on) {
+        autoRefresh = on;
+        if (on) {
+            invalidate(); // next paint() picks up the current view
+        }
     }
 
     // ----------------------------------------------------------- selection
@@ -317,12 +492,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
     @Override
     public Object getInfoComponent() {
         int total = featuresByFacing.values().stream().mapToInt(List::size).sum();
-        StringBuilder sb = new StringBuilder("<html>Maprizon coverage<br>");
-        sb.append(total).append(" features loaded for the last-fetched view<br>");
+        StringBuilder sb = new StringBuilder("<html>Maprizon coverage (downloaded)<br>");
+        sb.append(total).append(" features across ").append(loadedTileKeys.size()).append(" tile(s)<br>");
         for (String facing : FacingStyle.ALL_FACINGS) {
-            int count = featuresByFacing.getOrDefault(facing, java.util.Collections.emptyList()).size();
-            sb.append(facing).append(": ").append(count).append(enabledFacings.contains(facing) ? "" : " (hidden)").append("<br>");
+            int count = featuresByFacing.getOrDefault(facing, Collections.emptyList()).size();
+            sb.append(facing).append(": ").append(count)
+                    .append(enabledFacings.contains(facing) ? "" : " (hidden)").append("<br>");
         }
+        sb.append(autoRefresh ? "auto-refresh: on" : "auto-refresh: off").append("<br>");
         sb.append("</html>");
         JPanel panel = new JPanel(new BorderLayout());
         panel.add(new JLabel(sb.toString()), BorderLayout.CENTER);
@@ -332,7 +509,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
     @Override
     public String getToolTipText() {
         int total = featuresByFacing.values().stream().mapToInt(List::size).sum();
-        return "Maprizon coverage (" + total + " features in view)";
+        return "Maprizon coverage (" + total + " features downloaded)";
     }
 
     @Override
@@ -359,10 +536,23 @@ public class MaprizonLayer extends Layer implements MouseListener {
     @Override
     public Action[] getMenuEntries() {
         List<Action> actions = new ArrayList<>();
-        actions.add(new AbstractAction("Refresh Maprizon coverage for current view") {
+        actions.add(new AbstractAction("Download Maprizon coverage in current view") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                triggerLoad(true);
+                downloadCurrentView();
+            }
+        });
+        actions.add(new AbstractAction("Clear downloaded coverage") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                clearCoverage();
+            }
+        });
+        actions.add(new AbstractAction(
+                (autoRefresh ? "Disable" : "Enable") + " auto-refresh on pan") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                setAutoRefresh(!autoRefresh);
             }
         });
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
@@ -415,7 +605,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
     /**
-     * Builds the Viewer deep link for a feature at (lat, lon). Only sequence_id
+     * Builds the Maprizon deep link for a feature at (lat, lon). Only sequence_id
      * and lat/lon are required; other fields are included when present on the
      * feature. Per spec, "facing" is only ever emitted for front/left/right/360 -
      * "still" is not an accepted value for that parameter, so it is omitted for

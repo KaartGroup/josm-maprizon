@@ -3,6 +3,7 @@ package org.openstreetmap.josm.plugins.maprizon;
 import org.openstreetmap.josm.gui.MainApplication;
 import org.openstreetmap.josm.plugins.Plugin;
 import org.openstreetmap.josm.plugins.PluginInformation;
+import org.openstreetmap.josm.plugins.maprizon.actions.DownloadMaprizonCoverageAction;
 import org.openstreetmap.josm.plugins.maprizon.actions.ToggleMaprizonLayerAction;
 import org.openstreetmap.josm.tools.Logging;
 
@@ -20,6 +21,9 @@ public class MaprizonPlugin extends Plugin {
 
         ToggleMaprizonLayerAction toggleAction = new ToggleMaprizonLayerAction();
         MainApplication.getMenu().toolsMenu.add(toggleAction);
+
+        DownloadMaprizonCoverageAction downloadAction = new DownloadMaprizonCoverageAction();
+        MainApplication.getMenu().toolsMenu.add(downloadAction);
 
         Logging.info("Maprizon plugin loaded successfully");
     }
