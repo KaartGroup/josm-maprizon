@@ -35,7 +35,7 @@ public class PmtilesFetchTest {
     private static final String LAYER_NAME = "imagery";
 
     public static void main(String[] args) throws Exception {
-        System.out.println("=== KaartViewer PMTiles fetch+decode test ===");
+        System.out.println("=== Maprizon PMTiles fetch+decode test ===");
         System.out.println("URL: " + PMTILES_URL);
 
         URL url = new URL(PMTILES_URL);

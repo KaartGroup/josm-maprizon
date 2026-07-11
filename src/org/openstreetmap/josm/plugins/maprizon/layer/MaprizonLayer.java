@@ -1,4 +1,4 @@
-package org.openstreetmap.josm.plugins.kaartviewer.layer;
+package org.openstreetmap.josm.plugins.maprizon.layer;
 
 import org.openstreetmap.josm.data.Bounds;
 import org.openstreetmap.josm.data.coor.LatLon;
@@ -8,10 +8,10 @@ import org.openstreetmap.josm.gui.MapFrame;
 import org.openstreetmap.josm.gui.MapView;
 import org.openstreetmap.josm.gui.dialogs.LayerListDialog;
 import org.openstreetmap.josm.gui.layer.Layer;
-import org.openstreetmap.josm.plugins.kaartviewer.FacingStyle;
-import org.openstreetmap.josm.plugins.kaartviewer.data.ImageryFeature;
-import org.openstreetmap.josm.plugins.kaartviewer.pmtiles.PmtilesTileLoader;
-import org.openstreetmap.josm.plugins.kaartviewer.pmtiles.TileMath;
+import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
+import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
+import org.openstreetmap.josm.plugins.maprizon.pmtiles.PmtilesTileLoader;
+import org.openstreetmap.josm.plugins.maprizon.pmtiles.TileMath;
 import org.openstreetmap.josm.tools.ImageProvider;
 import org.openstreetmap.josm.tools.Logging;
 
@@ -44,15 +44,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * JOSM map layer showing Kaart Viewer street-level imagery sequence coverage,
+ * JOSM map layer showing Maprizon street-level imagery sequence coverage,
  * colored by camera facing, fetched from the public per-facing PMTiles files.
  *
- * Phase 1 scope: read-only coverage display + "View in Kaart Viewer" deep link
+ * Phase 1 scope: read-only coverage display + "View in Maprizon" deep link
  * for the nearest feature to the last map click. See this repo's README for
  * what is explicitly NOT built yet (reverse sync, changeset attribution,
  * private-org coverage).
  */
-public class KaartViewerLayer extends Layer implements MouseListener {
+public class MaprizonLayer extends Layer implements MouseListener {
 
     /** Cap on tiles fetched per refresh, to keep a single refresh cheap/bounded. */
     private static final int MAX_TILES_PER_FACING = 48;
@@ -60,7 +60,7 @@ public class KaartViewerLayer extends Layer implements MouseListener {
 
     private final PmtilesTileLoader loader = new PmtilesTileLoader();
     private final ExecutorService loadExecutor = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "kaartviewer-tile-loader");
+        Thread t = new Thread(r, "maprizon-tile-loader");
         t.setDaemon(true);
         return t;
     });
@@ -77,8 +77,8 @@ public class KaartViewerLayer extends Layer implements MouseListener {
     private ImageryFeature lastNearestFeature;
     private double[] lastNearestPoint;
 
-    public KaartViewerLayer() {
-        super("Kaart Viewer Coverage");
+    public MaprizonLayer() {
+        super("Maprizon Coverage");
     }
 
     @Override
@@ -174,7 +174,7 @@ public class KaartViewerLayer extends Layer implements MouseListener {
                     invalidate();
                 });
             } catch (Exception e) {
-                Logging.warn("KaartViewer: coverage load failed: " + e);
+                Logging.warn("Maprizon: coverage load failed: " + e);
             } finally {
                 loading.set(false);
             }
@@ -190,7 +190,7 @@ public class KaartViewerLayer extends Layer implements MouseListener {
             try {
                 result.put(facing, loadFacing(facing, bounds));
             } catch (IOException e) {
-                Logging.warn("KaartViewer: failed to load facing '" + facing + "': " + e.getMessage());
+                Logging.warn("Maprizon: failed to load facing '" + facing + "': " + e.getMessage());
                 result.put(facing, java.util.Collections.emptyList());
             }
         }
@@ -308,7 +308,7 @@ public class KaartViewerLayer extends Layer implements MouseListener {
     @Override
     public Icon getIcon() {
         try {
-            return ImageProvider.get("kaartviewer");
+            return ImageProvider.get("maprizon");
         } catch (RuntimeException e) {
             return null;
         }
@@ -317,7 +317,7 @@ public class KaartViewerLayer extends Layer implements MouseListener {
     @Override
     public Object getInfoComponent() {
         int total = featuresByFacing.values().stream().mapToInt(List::size).sum();
-        StringBuilder sb = new StringBuilder("<html>Kaart Viewer coverage<br>");
+        StringBuilder sb = new StringBuilder("<html>Maprizon coverage<br>");
         sb.append(total).append(" features loaded for the last-fetched view<br>");
         for (String facing : FacingStyle.ALL_FACINGS) {
             int count = featuresByFacing.getOrDefault(facing, java.util.Collections.emptyList()).size();
@@ -332,12 +332,12 @@ public class KaartViewerLayer extends Layer implements MouseListener {
     @Override
     public String getToolTipText() {
         int total = featuresByFacing.values().stream().mapToInt(List::size).sum();
-        return "Kaart Viewer coverage (" + total + " features in view)";
+        return "Maprizon coverage (" + total + " features in view)";
     }
 
     @Override
     public void mergeFrom(Layer from) {
-        throw new UnsupportedOperationException("KaartViewerLayer does not support merging");
+        throw new UnsupportedOperationException("MaprizonLayer does not support merging");
     }
 
     @Override
@@ -359,7 +359,7 @@ public class KaartViewerLayer extends Layer implements MouseListener {
     @Override
     public Action[] getMenuEntries() {
         List<Action> actions = new ArrayList<>();
-        actions.add(new AbstractAction("Refresh Kaart Viewer coverage for current view") {
+        actions.add(new AbstractAction("Refresh Maprizon coverage for current view") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 triggerLoad(true);
@@ -382,10 +382,10 @@ public class KaartViewerLayer extends Layer implements MouseListener {
             });
         }
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
-        actions.add(new AbstractAction("View in Kaart Viewer") {
+        actions.add(new AbstractAction("View in Maprizon") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                openInKaartViewer();
+                openInMaprizon();
             }
         });
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
@@ -394,11 +394,11 @@ public class KaartViewerLayer extends Layer implements MouseListener {
         return actions.toArray(new Action[0]);
     }
 
-    private void openInKaartViewer() {
+    private void openInMaprizon() {
         if (lastNearestFeature == null || lastNearestPoint == null) {
             JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
-                    "Click a point on the Kaart Viewer coverage layer first, then use this action.",
-                    "No Kaart Viewer feature selected",
+                    "Click a point on the Maprizon coverage layer first, then use this action.",
+                    "No Maprizon feature selected",
                     JOptionPane.INFORMATION_MESSAGE);
             return;
         }
@@ -406,7 +406,7 @@ public class KaartViewerLayer extends Layer implements MouseListener {
         try {
             Desktop.getDesktop().browse(new URI(url));
         } catch (Exception e) {
-            Logging.error("KaartViewer: failed to open browser for deep link " + url, e);
+            Logging.error("Maprizon: failed to open browser for deep link " + url, e);
             JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
                     "Could not open browser: " + e.getMessage(),
                     "Error",

@@ -1,8 +1,8 @@
-package org.openstreetmap.josm.plugins.kaartviewer.actions;
+package org.openstreetmap.josm.plugins.maprizon.actions;
 
 import org.openstreetmap.josm.actions.JosmAction;
 import org.openstreetmap.josm.gui.MainApplication;
-import org.openstreetmap.josm.plugins.kaartviewer.layer.KaartViewerLayer;
+import org.openstreetmap.josm.plugins.maprizon.layer.MaprizonLayer;
 import org.openstreetmap.josm.tools.ImageProvider;
 import org.openstreetmap.josm.tools.Shortcut;
 
@@ -11,37 +11,37 @@ import java.awt.event.KeyEvent;
 import java.util.List;
 
 /**
- * Menu action that adds the Kaart Viewer coverage layer if it isn't present,
+ * Menu action that adds the Maprizon coverage layer if it isn't present,
  * or removes it if it already is - a simple on/off toggle, mirroring the
  * ToggleVisualizationAction pattern used by CR_PLUGIN.
  */
-public class ToggleKaartViewerLayerAction extends JosmAction {
+public class ToggleMaprizonLayerAction extends JosmAction {
 
-    public ToggleKaartViewerLayerAction() {
+    public ToggleMaprizonLayerAction() {
         super(
-                "Kaart Viewer Coverage",
-                new ImageProvider("kaartviewer"),
-                "Show/hide the Kaart Viewer street-level imagery coverage layer",
+                "Maprizon Coverage",
+                new ImageProvider("maprizon"),
+                "Show/hide the Maprizon street-level imagery coverage layer",
                 Shortcut.registerShortcut(
-                        "view:kaartviewercoverage",
-                        "Toggle Kaart Viewer coverage layer",
+                        "view:maprizoncoverage",
+                        "Toggle Maprizon coverage layer",
                         KeyEvent.VK_K,
                         Shortcut.ALT_SHIFT),
                 false,
-                "kaartviewer-toggle-coverage",
+                "maprizon-toggle-coverage",
                 true);
         setEnabled(true);
     }
 
     @Override
     public void actionPerformed(ActionEvent e) {
-        List<KaartViewerLayer> existing = MainApplication.getLayerManager().getLayersOfType(KaartViewerLayer.class);
+        List<MaprizonLayer> existing = MainApplication.getLayerManager().getLayersOfType(MaprizonLayer.class);
         if (!existing.isEmpty()) {
-            for (KaartViewerLayer layer : existing) {
+            for (MaprizonLayer layer : existing) {
                 MainApplication.getLayerManager().removeLayer(layer);
             }
         } else {
-            MainApplication.getLayerManager().addLayer(new KaartViewerLayer());
+            MainApplication.getLayerManager().addLayer(new MaprizonLayer());
         }
     }
 

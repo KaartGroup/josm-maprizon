@@ -1,4 +1,4 @@
-package org.openstreetmap.josm.plugins.kaartviewer.data;
+package org.openstreetmap.josm.plugins.maprizon.data;
 
 import java.util.Collections;
 import java.util.List;

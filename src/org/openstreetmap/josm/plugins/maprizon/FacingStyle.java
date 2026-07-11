@@ -1,4 +1,4 @@
-package org.openstreetmap.josm.plugins.kaartviewer;
+package org.openstreetmap.josm.plugins.maprizon;
 
 import java.awt.Color;
 import java.util.Arrays;

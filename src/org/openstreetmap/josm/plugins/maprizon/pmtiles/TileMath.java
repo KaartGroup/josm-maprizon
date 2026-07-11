@@ -1,4 +1,4 @@
-package org.openstreetmap.josm.plugins.kaartviewer.pmtiles;
+package org.openstreetmap.josm.plugins.maprizon.pmtiles;
 
 /**
  * Standard Web Mercator slippy-map tile math, plus the extra bit PMTiles/MVT

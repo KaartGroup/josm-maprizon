@@ -137,9 +137,9 @@ JOSM's remote control server listens on `http://127.0.0.1:8111/` with full CORS 
 |-----------------|--------------|--------------|
 | "Open in JOSM" button | `/load_and_zoom?left=&right=&top=&bottom=` | JOSM downloads OSM data for Viewer's current viewport |
 | Click OSM feature → "Edit in JOSM" | `/load_object?objects=w123456&select=w123456` | JOSM downloads + selects that specific object |
-| "Add Viewer Imagery to JOSM" | `/imagery?type=tms&url=...&title=Kaart Viewer` | Adds Viewer's tile layer as imagery background in JOSM |
+| "Add Viewer Imagery to JOSM" | `/imagery?type=tms&url=...&title=Maprizon` | Adds Viewer's tile layer as imagery background in JOSM |
 | "Send OSM Data to JOSM" | `/load_data?data=...&new_layer=true` | Sends downloaded Overpass data directly into JOSM |
-| Pre-fill changeset metadata | `changeset_source=Kaart Viewer imagery&changeset_comment=...` | Attribution and context for edits |
+| Pre-fill changeset metadata | `changeset_source=Maprizon imagery&changeset_comment=...` | Attribution and context for edits |
 
 ### JOSM Connection Status
 
@@ -241,7 +241,7 @@ Same as Approach B but the JOSM plugin establishes a persistent WebSocket connec
 
 ---
 
-## Part 4: JOSM Plugin — "Kaart Viewer" Plugin
+## Part 4: JOSM Plugin — "Maprizon" Plugin
 
 A dedicated JOSM plugin (distributed via JOSM plugin repository or direct download) that makes JOSM a native companion to Viewer.
 
@@ -261,11 +261,11 @@ A dedicated JOSM plugin (distributed via JOSM plugin repository or direct downlo
    - Selection sync: select an OSM object in JOSM → Viewer highlights nearest imagery
 
 4. **Context Menu Integration**
-   - Right-click any OSM object in JOSM → "View in Kaart Viewer" → opens nearest imagery
+   - Right-click any OSM object in JOSM → "View in Maprizon" → opens nearest imagery
    - Right-click → "View imagery coverage" → shows what Viewer imagery exists for this area
 
 5. **Changeset Source Attribution**
-   - Automatically adds `source=Kaart Viewer imagery` to changesets when the Viewer imagery layer is active
+   - Automatically adds `source=Maprizon imagery` to changesets when the Viewer imagery layer is active
 
 ### Plugin Technical Stack
 

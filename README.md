@@ -1,18 +1,18 @@
-# Kaart Viewer JOSM Plugin
+# Maprizon JOSM Plugin
 
-A JOSM plugin that shows [Kaart Viewer](https://viewer.kaart.com) street-level
+A JOSM plugin that shows [Maprizon](https://viewer.kaart.com) street-level
 imagery sequence coverage as a toggleable map layer, colored by camera facing,
-with a one-click "View in Kaart Viewer" action that opens the exact clicked
+with a one-click "View in Maprizon" action that opens the exact clicked
 image in a browser.
 
 ## Phase 1 scope
 
-- A toggleable `KaartViewerLayer` (Tools menu -> "Kaart Viewer Coverage", or
+- A toggleable `MaprizonLayer` (Tools menu -> "Maprizon Coverage", or
   `Alt+Shift+K`) that fetches and renders public per-facing PMTiles coverage
   around the current map view.
 - Coverage is colored by facing (see "Color choices" below) and can be shown
   or hidden per facing from the layer's right-click menu.
-- Right-click on the layer in the Layers panel -> "View in Kaart Viewer" opens
+- Right-click on the layer in the Layers panel -> "View in Maprizon" opens
   the nearest clicked coverage point's image in your default browser via a
   deep link into viewer.kaart.com.
 - Data source: the public, per-facing PMTiles files at
@@ -40,7 +40,7 @@ using `-source 8 -target 8`, which still works - just emits "obsolete option"
 deprecation warnings) and Apache Ant.
 
 ```bash
-# Build the plugin jar (KaartViewer.jar)
+# Build the plugin jar (Maprizon.jar)
 ant clean dist
 
 # Install to your local JOSM (macOS: ~/Library/JOSM/plugins/,
@@ -49,21 +49,21 @@ ant install
 ```
 
 Then restart JOSM. The plugin should appear under
-`Preferences -> Plugins` as "KaartViewer", and a "Kaart Viewer Coverage" entry
+`Preferences -> Plugins` as "Maprizon", and a "Maprizon Coverage" entry
 appears in the Tools menu.
 
 ## Architecture
 
 ```
-src/org/openstreetmap/josm/plugins/kaartviewer/
-  KaartViewerPlugin.java          - main plugin class (org.openstreetmap.josm.plugins.Plugin)
+src/org/openstreetmap/josm/plugins/maprizon/
+  MaprizonPlugin.java          - main plugin class (org.openstreetmap.josm.plugins.Plugin)
   FacingStyle.java                - per-facing PMTiles URLs + colors + deep-link facing whitelist
   actions/
-    ToggleKaartViewerLayerAction.java  - JosmAction, adds/removes the layer
+    ToggleMaprizonLayerAction.java  - JosmAction, adds/removes the layer
   data/
     ImageryFeature.java           - one decoded coverage feature + its Viewer properties
   layer/
-    KaartViewerLayer.java         - the map layer: fetch/cache/render/context-menu/deep-link
+    MaprizonLayer.java         - the map layer: fetch/cache/render/context-menu/deep-link
   pmtiles/
     TileMath.java                 - slippy-map tile <-> lon/lat math (incl. MVT local-coord conversion)
     PmtilesTileLoader.java        - real PMTiles fetch + MVT decode (see "PMTiles/MVT decoding" below)
@@ -107,13 +107,13 @@ the live tile server**, not assumed:
 
    Note the low-zoom (z=2) tile's world-scale coverage feature decoded as a
    `LineString`, not a `Point` - the vector tileset generalizes sequences to
-   lines at low zoom. `KaartViewerLayer`/`PmtilesTileLoader` handle both
+   lines at low zoom. `MaprizonLayer`/`PmtilesTileLoader` handle both
    uniformly (a "feature" is just an ordered list of lon/lat vertices; a point
    is simply a 1-vertex case).
 
 4. Since the standalone test fully worked, this exact code path (PMTiles
    fetch -> gunzip -> MVT decode -> lon/lat reprojection) was wired directly
-   into `PmtilesTileLoader`, which the real `KaartViewerLayer` uses. **This is
+   into `PmtilesTileLoader`, which the real `MaprizonLayer` uses. **This is
    real, working code, not a stub** - it was proven end-to-end before being
    used in the layer.
 
@@ -147,7 +147,7 @@ actual `lib/josm-custom.jar` with `javap`, not guessed from memory or web
 search. Confirmed via `javap`:
 
 - `Layer` (abstract class): constructor `Layer(String)`; abstract methods
-  implemented by `KaartViewerLayer`: `getIcon()` (returns `javax.swing.Icon`),
+  implemented by `MaprizonLayer`: `getIcon()` (returns `javax.swing.Icon`),
   `getToolTipText()`, `mergeFrom(Layer)`, `isMergable(Layer)`,
   `visitBoundingBox(BoundingXYVisitor)`, `getInfoComponent()` (returns
   `Object`), and **`getMenuEntries()` returns `javax.swing.Action[]`** (this
@@ -160,7 +160,7 @@ search. Confirmed via `javap`:
 - `NoteLayer` was read as the "simple concrete Layer subclass" reference the
   task asked for: it extends a layer base class, implements `MouseListener`
   directly, registers itself via `hookUpMapView()`, and overrides `paint(...)`
-  - `KaartViewerLayer` follows the same shape (extends `Layer` directly
+  - `MaprizonLayer` follows the same shape (extends `Layer` directly
   rather than `AbstractModifiableLayer`/`GpxLayer`, since coverage is
   read-only and has no save/upload semantics to support).
 - `Layer.SeparatorLayerAction.INSTANCE` (a static singleton `Action`) and
@@ -221,16 +221,16 @@ other field is still included normally).
   is not a production-grade vector tile renderer (no tile-level caching
   across zoom changes, no partial/incremental redraw, no cancellation of an
   in-flight load if the view moves again mid-fetch).
-- **Nearest-point search for "View in Kaart Viewer"** is a simple linear scan
+- **Nearest-point search for "View in Maprizon"** is a simple linear scan
   over currently-loaded, currently-enabled features using planar (not
   geodesic) distance - fine at city scale, not exact at large view extents.
 - **No antimeridian/dateline handling** in the tile-range computation.
-- The bundled placeholder icon (`images/kaartviewer.png`) is a small,
+- The bundled placeholder icon (`images/maprizon.png`) is a small,
   deliberately simple generated PNG (a blue circle + bar, meant to evoke a
   camera lens) - **not polished art**. Swap it out before any real release.
 - Dependency jars are bundled by unzipping their classes directly into the
   plugin jar at `ant dist` time (see below) rather than via a proper shaded
-  build - functionally fine, but means `KaartViewer.jar` is ~2.4 MB instead
+  build - functionally fine, but means `Maprizon.jar` is ~2.4 MB instead
   of a few KB.
 
 ## Build system notes
@@ -249,12 +249,12 @@ other field is still included normally).
   step that unzips every third-party jar in `lib/` (**except**
   `josm-custom.jar`, which JOSM supplies at runtime and must not be bundled)
   directly into `build/classes` before jarring, producing one self-contained
-  `KaartViewer.jar`.
+  `Maprizon.jar`.
 - `ant clean dist` was actually run during development and produces a clean
   build with zero compile errors (only expected `-source 8`/`-target 8`
   "obsolete" deprecation warnings from the JDK 21 compiler, and one
   `new URL(String)` deprecation warning in `PmtilesTileLoader`). `ant install`
   was also actually run and verified to copy the jar to
-  `~/Library/JOSM/plugins/KaartViewer.jar` on macOS (that verification copy
+  `~/Library/JOSM/plugins/Maprizon.jar` on macOS (that verification copy
   was removed afterward - this is a development check, not a real
   installation).

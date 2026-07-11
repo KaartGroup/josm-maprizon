@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<project name="KaartViewer" default="dist" basedir=".">
+<project name="Maprizon" default="dist" basedir=".">
 
     <!-- enter the SVN commit message -->
-    <property name="commit.message" value="JOSM plugin for Kaart Viewer street-level imagery coverage"/>
+    <property name="commit.message" value="JOSM plugin for Maprizon street-level imagery coverage"/>
     <!-- enter the *lowest* JOSM version this plugin is currently compatible with -->
     <property name="plugin.main.version" value="18000"/>
 
@@ -11,9 +11,9 @@
          These duplicate plugin.properties (see build-common.xml note) - keep in sync by hand.
     -->
     <property name="plugin.author" value="Kaart"/>
-    <property name="plugin.class" value="org.openstreetmap.josm.plugins.kaartviewer.KaartViewerPlugin"/>
-    <property name="plugin.description" value="Shows Kaart Viewer street-level imagery coverage in JOSM, with one-click open-in-browser"/>
-    <property name="plugin.icon" value="images/kaartviewer.png"/>
+    <property name="plugin.class" value="org.openstreetmap.josm.plugins.maprizon.MaprizonPlugin"/>
+    <property name="plugin.description" value="Shows Maprizon street-level imagery coverage in JOSM, with one-click open-in-browser"/>
+    <property name="plugin.icon" value="images/maprizon.png"/>
     <property name="plugin.link" value=""/>
     <!-- No plugin.requires: unlike CR_PLUGIN, this plugin has no dependency on another JOSM plugin. -->
 

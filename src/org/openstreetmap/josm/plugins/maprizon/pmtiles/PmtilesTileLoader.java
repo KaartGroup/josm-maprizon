@@ -1,4 +1,4 @@
-package org.openstreetmap.josm.plugins.kaartviewer.pmtiles;
+package org.openstreetmap.josm.plugins.maprizon.pmtiles;
 
 import ch.poole.geo.pmtiles.Constants;
 import ch.poole.geo.pmtiles.HttpUrlConnectionChannel;
@@ -12,8 +12,8 @@ import com.wdtinc.mapbox_vector_tile.adapt.jts.model.JtsMvt;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.GeometryFactory;
-import org.openstreetmap.josm.plugins.kaartviewer.FacingStyle;
-import org.openstreetmap.josm.plugins.kaartviewer.data.ImageryFeature;
+import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
+import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
 import org.openstreetmap.josm.tools.Logging;
 
 import java.io.ByteArrayInputStream;
@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.GZIPInputStream;
 
 /**
- * Fetches and decodes tiles from the public per-facing Kaart Viewer PMTiles
+ * Fetches and decodes tiles from the public per-facing Maprizon PMTiles
  * archives, over plain HTTP range requests (no local file, no server-side help
  * needed).
  *
@@ -146,7 +146,7 @@ public final class PmtilesTileLoader implements AutoCloseable {
             try {
                 e.getValue().close();
             } catch (IOException ex) {
-                Logging.warn("KaartViewer: failed to close PMTiles reader for facing " + e.getKey() + ": " + ex.getMessage());
+                Logging.warn("Maprizon: failed to close PMTiles reader for facing " + e.getKey() + ": " + ex.getMessage());
             }
         }
         readersByFacing.clear();
