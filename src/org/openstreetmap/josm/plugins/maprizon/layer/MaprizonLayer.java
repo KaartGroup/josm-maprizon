@@ -11,6 +11,7 @@ import org.openstreetmap.josm.gui.dialogs.LayerListDialog;
 import org.openstreetmap.josm.gui.layer.Layer;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
+import org.openstreetmap.josm.plugins.maprizon.gui.MaprizonImageDialog;
 import org.openstreetmap.josm.plugins.maprizon.pmtiles.PmtilesTileLoader;
 import org.openstreetmap.josm.plugins.maprizon.pmtiles.TileMath;
 import org.openstreetmap.josm.tools.ImageProvider;
@@ -532,25 +533,20 @@ public class MaprizonLayer extends Layer implements MouseListener {
         lastNearestPoint = nearest.point;
         invalidate();
         if (e.getClickCount() >= 2) {
+            // Double-click still opens the web viewer (deep link) as a convenience.
             openInMaprizon();
         } else {
-            showFeatureInfo(nearest.feature);
+            // Single click shows the actual image IN JOSM (Phase 1 image viewer).
+            MaprizonImageDialog dialog = MaprizonImageDialog.getInstance();
+            if (dialog != null) {
+                dialog.showForClickedFeature(nearest.feature);
+            } else {
+                // Dialog not registered (no map frame yet) — fall back to a hint.
+                new Notification("<html><b>Maprizon:</b> " + nearest.feature.getFacing()
+                        + "<br><i>double-click to open in Maprizon</i></html>")
+                        .setDuration(Notification.TIME_SHORT).show();
+            }
         }
-    }
-
-    /** Surface the selected feature's identity plus how to open it, right at the
-     * click, instead of the "View in Maprizon" action being hidden in the layer
-     * menu. */
-    private void showFeatureInfo(ImageryFeature f) {
-        StringBuilder sb = new StringBuilder("<html><b>Maprizon:</b> ").append(f.getFacing());
-        if (f.getSequenceId() != null) {
-            sb.append("<br>sequence ").append(f.getSequenceId());
-        }
-        if (f.getTimestamp() != null) {
-            sb.append("<br>").append(f.getTimestamp());
-        }
-        sb.append("<br><i>double-click to open in Maprizon</i></html>");
-        new Notification(sb.toString()).setDuration(Notification.TIME_SHORT).show();
     }
 
     @Override
