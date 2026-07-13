@@ -80,10 +80,23 @@ public final class PmtilesTileLoader implements AutoCloseable {
      * "imagery" layer.
      */
     public List<ImageryFeature> loadTile(String facing, int z, int x, int y) throws IOException {
+        List<ImageryFeature> features = loadTileOrNull(facing, z, x, y);
+        return features != null ? features : java.util.Collections.emptyList();
+    }
+
+    /**
+     * Like {@link #loadTile}, but returns {@code null} when the tile does NOT
+     * exist in the archive at this z/x/y — as opposed to an empty list for a
+     * tile that IS present but carries no "imagery" features. This lets callers
+     * distinguish "nothing baked here, try the parent tile" (overzoom) from
+     * "tile present, genuinely empty area", which matters because the archives
+     * advertise maxZoom=16 in their header but only bake tiles down to z15.
+     */
+    public List<ImageryFeature> loadTileOrNull(String facing, int z, int x, int y) throws IOException {
         Reader reader = readerFor(facing);
         byte[] raw = reader.getTile(z, x, y);
         if (raw == null) {
-            return java.util.Collections.emptyList();
+            return null;
         }
 
         byte[] mvtBytes = raw;

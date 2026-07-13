@@ -6,6 +6,7 @@ import org.openstreetmap.josm.data.osm.visitor.BoundingXYVisitor;
 import org.openstreetmap.josm.gui.MainApplication;
 import org.openstreetmap.josm.gui.MapFrame;
 import org.openstreetmap.josm.gui.MapView;
+import org.openstreetmap.josm.gui.Notification;
 import org.openstreetmap.josm.gui.dialogs.LayerListDialog;
 import org.openstreetmap.josm.gui.layer.Layer;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
@@ -22,10 +23,13 @@ import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
+import java.awt.BasicStroke;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Desktop;
 import java.awt.Graphics2D;
 import java.awt.Point;
+import java.awt.RenderingHints;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
@@ -80,6 +84,18 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private static final int FALLBACK_MIN_ZOOM = 2;
     private static final int FALLBACK_MAX_ZOOM = 16;
 
+    /**
+     * Max levels to walk UP (to parent tiles) when the tile at the requested
+     * zoom doesn't exist in the archive — i.e. overzoom. The archives advertise
+     * maxZoom=16 in their header but only bake tiles down to z15, so a zoomed-in
+     * request for z16 returns nothing; falling back to the z15 parent renders the
+     * deepest real coverage instead of a "no coverage" modal. BOUNDED so a
+     * street-level view can never collapse all the way to a low-zoom world tile
+     * (which would pull thousands of features — the scale rule). 3 levels covers
+     * the header-vs-real gap plus moderate sparsity.
+     */
+    private static final int MAX_OVERZOOM_STEPS = 3;
+
     private final PmtilesTileLoader loader = new PmtilesTileLoader();
     private final ExecutorService loadExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "maprizon-tile-loader");
@@ -122,6 +138,18 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private ImageryFeature lastNearestFeature;
     private double[] lastNearestPoint;
 
+    // --- rendering constants (Phase 1 styling: coverage was hairline-thin +
+    // tiny dots, invisible except at max zoom; these make it legible). ---
+    /** Sequence-line stroke width, in px. */
+    private static final float LINE_WIDTH = 3.0f;
+    /** Per-image point marker radius, in px. */
+    private static final int POINT_RADIUS = 3;
+    /** Highlight ring radius for the selected feature's clicked point, in px. */
+    private static final int SELECTED_RADIUS = 8;
+    /** Max screen-space distance (px) from a click to a feature for it to count
+     * as selected — zoom-independent, so a click in empty space selects nothing. */
+    private static final double SELECT_PIXEL_THRESHOLD = 18.0;
+
     public MaprizonLayer() {
         super("Maprizon Coverage");
         enabledFacings.addAll(FacingStyle.ALL_FACINGS);
@@ -159,6 +187,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
             submitDownload(bbox, mv.getWidth(), false, false);
         }
 
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setStroke(new BasicStroke(LINE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+
         for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
             String facing = entry.getKey();
             if (!enabledFacings.contains(facing)) {
@@ -169,19 +200,40 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 paintFeature(g, mv, feature);
             }
         }
+
+        // Selected-feature highlight drawn last, on top of everything.
+        if (lastNearestFeature != null && lastNearestPoint != null
+                && enabledFacings.contains(lastNearestFeature.getFacing())) {
+            paintHighlight(g, mv);
+        }
     }
 
     private void paintFeature(Graphics2D g, MapView mv, ImageryFeature feature) {
         List<double[]> pts = feature.getPoints();
         Point prev = null;
+        int r = POINT_RADIUS;
         for (double[] lonLat : pts) {
             Point p = mv.getPoint(new LatLon(lonLat[1], lonLat[0]));
             if (prev != null) {
                 g.drawLine(prev.x, prev.y, p.x, p.y);
             }
-            g.fillOval(p.x - 2, p.y - 2, 4, 4);
+            g.fillOval(p.x - r, p.y - r, 2 * r, 2 * r);
             prev = p;
         }
+    }
+
+    /** Draw a prominent ring + facing-coloured dot at the currently selected
+     * feature's clicked point, so a click gives visible confirmation of what is
+     * selected (and thus what "View in Maprizon" / double-click will open). */
+    private void paintHighlight(Graphics2D g, MapView mv) {
+        Point p = mv.getPoint(new LatLon(lastNearestPoint[1], lastNearestPoint[0]));
+        int r = SELECTED_RADIUS;
+        g.setStroke(new BasicStroke(2.5f));
+        g.setColor(Color.WHITE);
+        g.drawOval(p.x - r - 1, p.y - r - 1, 2 * (r + 1), 2 * (r + 1));
+        g.setColor(FacingStyle.colorFor(lastNearestFeature.getFacing()));
+        g.drawOval(p.x - r, p.y - r, 2 * r, 2 * r);
+        g.fillOval(p.x - POINT_RADIUS, p.y - POINT_RADIUS, 2 * POINT_RADIUS, 2 * POINT_RADIUS);
     }
 
     // ------------------------------------------------------------- download
@@ -258,14 +310,18 @@ public class MaprizonLayer extends Layer implements MouseListener {
                                 continue;
                             }
                             try {
-                                acc.addAll(loader.loadTile(facing, zoom, tx, ty));
-                                // Record as loaded ONLY on success, HERE on the
-                                // loader thread (not deferred to the EDT merge):
-                                // the single-thread executor guarantees this
-                                // download's ledger is complete before the next
-                                // one plans, so overlapping downloads never
-                                // re-fetch or double-count. A tile that threw
-                                // stays absent from the ledger -> retriable.
+                                acc.addAll(loadWithOverzoom(facing, zoom, tx, ty));
+                                // Record the REQUESTED tile as loaded ONLY on
+                                // success, HERE on the loader thread (not deferred
+                                // to the EDT merge): the single-thread executor
+                                // guarantees this download's ledger is complete
+                                // before the next one plans, so overlapping
+                                // downloads never re-fetch or double-count. A tile
+                                // that threw stays absent from the ledger ->
+                                // retriable. (loadWithOverzoom separately records
+                                // the ANCESTOR tile it actually served, so sibling
+                                // requests that collapse onto the same parent skip
+                                // the decode instead of duplicating its features.)
                                 loadedTileKeys.add(key);
                             } catch (IOException ioe) {
                                 Logging.warn("Maprizon: tile fetch failed " + key + ": " + ioe.getMessage());
@@ -307,6 +363,43 @@ public class MaprizonLayer extends Layer implements MouseListener {
             next.put(e.getKey(), combined);
         }
         featuresByFacing = next;
+    }
+
+    /**
+     * Fetch one requested tile's features with BOUNDED overzoom: if the tile is
+     * absent at the requested zoom, walk up to parent tiles (z-1, z-2, …) until
+     * one exists, or the step budget / archive-min-zoom floor is reached. This is
+     * what makes zoomed-in views render — the archives declare maxZoom=16 but only
+     * bake to z15, so the requested z16 tile is absent and we fall back to z15.
+     *
+     * <p>Records the ANCESTOR tile actually served in {@link #loadedTileKeys}, and
+     * returns an empty list (skipping the decode) when a sibling request already
+     * served that same ancestor — so several requested tiles collapsing onto one
+     * parent never duplicate its features.
+     */
+    private List<ImageryFeature> loadWithOverzoom(String facing, int zoom, int tx, int ty) throws IOException {
+        int az = zoom;
+        int ax = tx;
+        int ay = ty;
+        int minZoom = archiveMinZoom();
+        for (int step = 0; step <= MAX_OVERZOOM_STEPS && az >= minZoom; step++) {
+            String servedKey = tileKey(facing, az, ax, ay);
+            if (loadedTileKeys.contains(servedKey)) {
+                // A sibling already fetched this ancestor; its features are in the
+                // store — don't add them again.
+                return Collections.emptyList();
+            }
+            List<ImageryFeature> features = loader.loadTileOrNull(facing, az, ax, ay);
+            if (features != null) {
+                loadedTileKeys.add(servedKey);
+                return features;
+            }
+            // Tile absent at this level -> step up to the parent tile.
+            az -= 1;
+            ax >>= 1;
+            ay >>= 1;
+        }
+        return Collections.emptyList();
     }
 
     private long countNewTiles(String facing, int zoom, int[] r) {
@@ -424,11 +517,40 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
         lastClickLatLon = map.mapView.getLatLon(e.getX(), e.getY());
         NearestResult nearest = findNearest(lastClickLatLon);
+        // Reject if the nearest feature is too far from the click in SCREEN space
+        // (zoom-independent), so clicking empty map selects nothing.
         if (nearest != null) {
-            lastNearestFeature = nearest.feature;
-            lastNearestPoint = nearest.point;
-            invalidate();
+            Point fp = map.mapView.getPoint(new LatLon(nearest.point[1], nearest.point[0]));
+            if (Math.hypot(fp.x - e.getX(), fp.y - e.getY()) > SELECT_PIXEL_THRESHOLD) {
+                nearest = null;
+            }
         }
+        if (nearest == null) {
+            return;
+        }
+        lastNearestFeature = nearest.feature;
+        lastNearestPoint = nearest.point;
+        invalidate();
+        if (e.getClickCount() >= 2) {
+            openInMaprizon();
+        } else {
+            showFeatureInfo(nearest.feature);
+        }
+    }
+
+    /** Surface the selected feature's identity plus how to open it, right at the
+     * click, instead of the "View in Maprizon" action being hidden in the layer
+     * menu. */
+    private void showFeatureInfo(ImageryFeature f) {
+        StringBuilder sb = new StringBuilder("<html><b>Maprizon:</b> ").append(f.getFacing());
+        if (f.getSequenceId() != null) {
+            sb.append("<br>sequence ").append(f.getSequenceId());
+        }
+        if (f.getTimestamp() != null) {
+            sb.append("<br>").append(f.getTimestamp());
+        }
+        sb.append("<br><i>double-click to open in Maprizon</i></html>");
+        new Notification(sb.toString()).setDuration(Notification.TIME_SHORT).show();
     }
 
     @Override
