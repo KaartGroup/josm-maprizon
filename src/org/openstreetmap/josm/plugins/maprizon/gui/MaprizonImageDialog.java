@@ -3,6 +3,7 @@ package org.openstreetmap.josm.plugins.maprizon.gui;
 import org.openstreetmap.josm.gui.dialogs.ToggleDialog;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
 import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient;
+import org.openstreetmap.josm.plugins.maprizon.layer.MaprizonLayer;
 import org.openstreetmap.josm.tools.HttpClient;
 import org.openstreetmap.josm.tools.Logging;
 import org.openstreetmap.josm.tools.Shortcut;
@@ -77,6 +78,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
     private List<ImageryFeature> frames = Collections.emptyList();
     private int index;
+    /** Layer that originated the current selection, so we can move its on-map
+     * marker to the frame being shown as the user walks the sequence. */
+    private MaprizonLayer originatingLayer;
 
     public MaprizonImageDialog() {
         super("Maprizon Image",
@@ -133,10 +137,11 @@ public final class MaprizonImageDialog extends ToggleDialog {
      * its full sequence in the background and display it. Falls back to showing
      * just the clicked frame if the sequence lookup fails.
      */
-    public void showForClickedFeature(ImageryFeature clicked) {
+    public void showForClickedFeature(ImageryFeature clicked, double[] clickLonLat, MaprizonLayer layer) {
         unfurlDialog();
         status.setText("Loading…");
         imagePanel.setImage(null);
+        this.originatingLayer = layer;
         final long token = loadToken.incrementAndGet();
         exec.submit(() -> {
             ViewerApiClient.SequenceResult result = ViewerApiClient.fetchPublicSequence(clicked);
@@ -144,7 +149,10 @@ public final class MaprizonImageDialog extends ToggleDialog {
             final int start;
             if (result != null) {
                 seq = result.frames;
-                start = result.clickedIndex;
+                // Open at the frame nearest the click so the image + on-map
+                // marker land where the user clicked (tile line features carry
+                // no per-frame index, so the API's clicked_index defaults to 0).
+                start = clickLonLat != null ? nearestIndex(seq, clickLonLat) : result.clickedIndex;
             } else {
                 seq = Collections.singletonList(clicked);
                 start = 0;
@@ -158,6 +166,25 @@ public final class MaprizonImageDialog extends ToggleDialog {
                 display();
             });
         });
+    }
+
+    private static int nearestIndex(List<ImageryFeature> frames, double[] lonLat) {
+        int best = 0;
+        double bestDistSq = Double.MAX_VALUE;
+        for (int i = 0; i < frames.size(); i++) {
+            List<double[]> pts = frames.get(i).getPoints();
+            if (pts.isEmpty()) {
+                continue;
+            }
+            double dLon = pts.get(0)[0] - lonLat[0];
+            double dLat = pts.get(0)[1] - lonLat[1];
+            double d = dLon * dLon + dLat * dLat;
+            if (d < bestDistSq) {
+                bestDistSq = d;
+                best = i;
+            }
+        }
+        return best;
     }
 
     private void step(int delta) {
@@ -181,6 +208,10 @@ public final class MaprizonImageDialog extends ToggleDialog {
             return;
         }
         ImageryFeature f = frames.get(index);
+        // Move the on-map selection marker to the frame now being shown.
+        if (originatingLayer != null) {
+            originatingLayer.highlightFrame(f);
+        }
         StringBuilder sb = new StringBuilder("<html>");
         sb.append(f.getFacing()).append("  ·  ").append(index + 1).append(" / ").append(frames.size());
         if (f.getTimestamp() != null) {

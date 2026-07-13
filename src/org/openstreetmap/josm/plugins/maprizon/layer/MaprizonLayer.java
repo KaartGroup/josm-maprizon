@@ -189,16 +189,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
 
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setStroke(new BasicStroke(LINE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
 
         for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
             String facing = entry.getKey();
             if (!enabledFacings.contains(facing)) {
                 continue;
             }
-            g.setColor(FacingStyle.colorFor(facing));
+            Color color = FacingStyle.colorFor(facing);
             for (ImageryFeature feature : entry.getValue()) {
-                paintFeature(g, mv, feature);
+                paintFeature(g, mv, feature, color);
             }
         }
 
@@ -209,18 +208,53 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
     }
 
-    private void paintFeature(Graphics2D g, MapView mv, ImageryFeature feature) {
+    private void paintFeature(Graphics2D g, MapView mv, ImageryFeature feature, Color color) {
         List<double[]> pts = feature.getPoints();
-        Point prev = null;
-        int r = POINT_RADIUS;
-        for (double[] lonLat : pts) {
-            Point p = mv.getPoint(new LatLon(lonLat[1], lonLat[0]));
-            if (prev != null) {
-                g.drawLine(prev.x, prev.y, p.x, p.y);
-            }
-            g.fillOval(p.x - r, p.y - r, 2 * r, 2 * r);
-            prev = p;
+        Point[] screen = new Point[pts.size()];
+        for (int i = 0; i < pts.size(); i++) {
+            double[] lonLat = pts.get(i);
+            screen[i] = mv.getPoint(new LatLon(lonLat[1], lonLat[0]));
         }
+
+        // Black casing under the coloured line so light colours (esp. white
+        // front) stay visible on any basemap — mirrors the viewer's outline.
+        if (screen.length > 1) {
+            g.setColor(Color.BLACK);
+            g.setStroke(new BasicStroke(LINE_WIDTH + 2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            drawPolyline(g, screen);
+            g.setColor(color);
+            g.setStroke(new BasicStroke(LINE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            drawPolyline(g, screen);
+        }
+
+        // Points: black outline circle then the facing-coloured dot on top.
+        int r = POINT_RADIUS;
+        for (Point p : screen) {
+            g.setColor(Color.BLACK);
+            g.fillOval(p.x - r - 1, p.y - r - 1, 2 * (r + 1), 2 * (r + 1));
+            g.setColor(color);
+            g.fillOval(p.x - r, p.y - r, 2 * r, 2 * r);
+        }
+    }
+
+    private static void drawPolyline(Graphics2D g, Point[] pts) {
+        for (int i = 1; i < pts.length; i++) {
+            g.drawLine(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
+        }
+    }
+
+    /**
+     * Move the selection highlight to a specific sequence frame — called by the
+     * image dialog as the user walks the sequence (prev/next), so the on-map
+     * marker tracks the image currently shown. EDT only.
+     */
+    public void highlightFrame(ImageryFeature frame) {
+        if (frame == null || frame.getPoints().isEmpty()) {
+            return;
+        }
+        lastNearestFeature = frame;
+        lastNearestPoint = frame.getPoints().get(0);
+        invalidate();
     }
 
     /** Draw a prominent ring + facing-coloured dot at the currently selected
@@ -539,7 +573,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
             // Single click shows the actual image IN JOSM (Phase 1 image viewer).
             MaprizonImageDialog dialog = MaprizonImageDialog.getInstance();
             if (dialog != null) {
-                dialog.showForClickedFeature(nearest.feature);
+                dialog.showForClickedFeature(nearest.feature, nearest.point, this);
             } else {
                 // Dialog not registered (no map frame yet) — fall back to a hint.
                 new Notification("<html><b>Maprizon:</b> " + nearest.feature.getFacing()

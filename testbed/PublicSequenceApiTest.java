@@ -92,6 +92,7 @@ public class PublicSequenceApiTest {
             System.out.println("features=" + (feats == null ? 0 : feats.size()) + " clicked_index=" + clicked);
             if (feats != null && !feats.isEmpty()) {
                 String firstImg = feats.getJsonObject(0).getJsonObject("properties").getString("img", null);
+                System.out.println("first frame geometry=" + feats.getJsonObject(0).get("geometry"));
                 System.out.println("first frame img=" + firstImg);
                 if (firstImg != null) {
                     testImage(firstImg);
