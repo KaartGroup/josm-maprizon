@@ -10,14 +10,16 @@ import java.util.Map;
  * Per-facing constants: the list of supported camera facings, the public PMTiles
  * URL for each, and a distinct display color for each.
  *
- * Color choices (Phase 1, no existing color scheme found in the Viewer web app or
- * in CR_PLUGIN to reuse, so these were picked fresh for clear visual separation
- * against typical JOSM backgrounds - aerial imagery and OSM data):
- *   front -> deep orange  #E64A19
- *   left  -> blue         #1976D2
- *   right -> green        #388E3C
- *   360   -> purple       #7B1FA2
- *   still -> amber        #FBC02D
+ * Per-facing display colors, matched EXACTLY to the Viewer web app's map layer
+ * (client/src/.../MapComponents.js FACING_CONFIG + sequenceLayerStyles.js) so
+ * coverage reads the same in JOSM as in the viewer:
+ *   front -> white   #FFFFFF
+ *   left  -> red     #FF0000
+ *   right -> green   #00FF00
+ *   360   -> purple  #9900FF
+ *   still -> amber   #FBC02D   (viewer has no still map layer; kept distinct here)
+ * White front is only visible against a black outline (see MaprizonLayer paint),
+ * mirroring the viewer's black outline circle under each point.
  */
 public final class FacingStyle {
 
@@ -40,10 +42,10 @@ public final class FacingStyle {
 
     private static final Map<String, Color> COLORS = new LinkedHashMap<>();
     static {
-        COLORS.put(FRONT, new Color(0xE6, 0x4A, 0x19));
-        COLORS.put(LEFT, new Color(0x19, 0x76, 0xD2));
-        COLORS.put(RIGHT, new Color(0x38, 0x8E, 0x3C));
-        COLORS.put(FACING_360, new Color(0x7B, 0x1F, 0xA2));
+        COLORS.put(FRONT, new Color(0xFF, 0xFF, 0xFF));
+        COLORS.put(LEFT, new Color(0xFF, 0x00, 0x00));
+        COLORS.put(RIGHT, new Color(0x00, 0xFF, 0x00));
+        COLORS.put(FACING_360, new Color(0x99, 0x00, 0xFF));
         COLORS.put(STILL, new Color(0xFB, 0xC0, 0x2D));
     }
 
