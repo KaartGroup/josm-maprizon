@@ -31,7 +31,11 @@ public class DownloadMaprizonCoverageAction extends JosmAction {
                         Shortcut.ALT_SHIFT),
                 false,
                 "maprizon-download-coverage",
-                true);
+                // installAdapters=false: always-available action (it creates its
+                // own layer + downloads); must not be gated on JOSM's OSM data /
+                // selection context, which would grey it out + kill the hotkey
+                // when only imagery (no data layer) is present.
+                false);
         setEnabled(true);
     }
 

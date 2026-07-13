@@ -29,7 +29,11 @@ public class ToggleMaprizonLayerAction extends JosmAction {
                         Shortcut.ALT_SHIFT),
                 false,
                 "maprizon-toggle-coverage",
-                true);
+                // installAdapters=false: this action is context-independent (it
+                // just adds/removes our own layer), so it must NOT be tied to
+                // JOSM's data/selection state — otherwise JOSM greys it out and
+                // disables its hotkey when no OSM data layer is present.
+                false);
         setEnabled(true);
     }
 
