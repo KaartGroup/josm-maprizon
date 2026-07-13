@@ -190,14 +190,25 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
+        // TWO passes so no facing's colour is buried under another facing's black
+        // casing where they overlap (facings share a vehicle's GPS trace and can
+        // be dense — e.g. right >> front here). Pass 1: all black casings/outlines.
+        // Pass 2: all coloured lines/points on top.
         for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
-            String facing = entry.getKey();
-            if (!enabledFacings.contains(facing)) {
+            if (!enabledFacings.contains(entry.getKey())) {
                 continue;
             }
-            Color color = FacingStyle.colorFor(facing);
             for (ImageryFeature feature : entry.getValue()) {
-                paintFeature(g, mv, feature, color);
+                paintCasing(g, mv, feature);
+            }
+        }
+        for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
+            if (!enabledFacings.contains(entry.getKey())) {
+                continue;
+            }
+            Color color = FacingStyle.colorFor(entry.getKey());
+            for (ImageryFeature feature : entry.getValue()) {
+                paintColor(g, mv, feature, color);
             }
         }
 
@@ -208,31 +219,41 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
     }
 
-    private void paintFeature(Graphics2D g, MapView mv, ImageryFeature feature, Color color) {
+    private Point[] toScreen(MapView mv, ImageryFeature feature) {
         List<double[]> pts = feature.getPoints();
         Point[] screen = new Point[pts.size()];
         for (int i = 0; i < pts.size(); i++) {
             double[] lonLat = pts.get(i);
             screen[i] = mv.getPoint(new LatLon(lonLat[1], lonLat[0]));
         }
+        return screen;
+    }
 
-        // Black casing under the coloured line so light colours (esp. white
-        // front) stay visible on any basemap — mirrors the viewer's outline.
+    /** Pass 1: black casing under the line + black outline under each point, so
+     * light colours (esp. white front) stay visible — mirrors the viewer. */
+    private void paintCasing(Graphics2D g, MapView mv, ImageryFeature feature) {
+        Point[] screen = toScreen(mv, feature);
+        g.setColor(Color.BLACK);
         if (screen.length > 1) {
-            g.setColor(Color.BLACK);
             g.setStroke(new BasicStroke(LINE_WIDTH + 2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
             drawPolyline(g, screen);
-            g.setColor(color);
+        }
+        int r = POINT_RADIUS + 1;
+        for (Point p : screen) {
+            g.fillOval(p.x - r, p.y - r, 2 * r, 2 * r);
+        }
+    }
+
+    /** Pass 2: the facing-coloured line + point on top of the casing. */
+    private void paintColor(Graphics2D g, MapView mv, ImageryFeature feature, Color color) {
+        Point[] screen = toScreen(mv, feature);
+        g.setColor(color);
+        if (screen.length > 1) {
             g.setStroke(new BasicStroke(LINE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
             drawPolyline(g, screen);
         }
-
-        // Points: black outline circle then the facing-coloured dot on top.
         int r = POINT_RADIUS;
         for (Point p : screen) {
-            g.setColor(Color.BLACK);
-            g.fillOval(p.x - r - 1, p.y - r - 1, 2 * (r + 1), 2 * (r + 1));
-            g.setColor(color);
             g.fillOval(p.x - r, p.y - r, 2 * r, 2 * r);
         }
     }
