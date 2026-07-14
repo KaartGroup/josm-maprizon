@@ -12,6 +12,8 @@ import org.openstreetmap.josm.gui.layer.Layer;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
 import org.openstreetmap.josm.plugins.maprizon.gui.MaprizonImageDialog;
+import org.openstreetmap.josm.plugins.maprizon.oauth.LoginFlow;
+import org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth;
 import org.openstreetmap.josm.plugins.maprizon.pmtiles.PmtilesTileLoader;
 import org.openstreetmap.josm.plugins.maprizon.pmtiles.TileMath;
 import org.openstreetmap.josm.tools.ImageProvider;
@@ -709,6 +711,29 @@ public class MaprizonLayer extends Layer implements MouseListener {
     @Override
     public Action[] getMenuEntries() {
         List<Action> actions = new ArrayList<>();
+
+        // Optional login: unlocks private imagery (signed image bytes + private
+        // sequences). Logged-out is the default and everything else works without it.
+        ViewerAuth auth = ViewerAuth.getInstance();
+        if (auth.isLoggedIn()) {
+            String who = auth.email().isEmpty() ? "" : " (" + auth.email() + ")";
+            actions.add(new AbstractAction("Log out of Viewer" + who) {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    auth.logout();
+                    invalidate();
+                }
+            });
+        } else {
+            actions.add(new AbstractAction("Log in to Viewer (view private imagery)") {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    LoginFlow.start(MaprizonLayer.this::invalidate);
+                }
+            });
+        }
+        actions.add(Layer.SeparatorLayerAction.INSTANCE);
+
         actions.add(new AbstractAction("Download Maprizon coverage in current view") {
             @Override
             public void actionPerformed(ActionEvent e) {

@@ -1,7 +1,56 @@
 # Maprizon JOSM Plugin — Auth & Public/Private Access Plan
 
-**Status:** PLAN ONLY (2026-07-13). Not built. Viewer-side dependencies are pending a
-conversation with Devin (public-map imagery reachability + his new timed-workers method).
+**Status update (2026-07-14): the OPTIONAL LOGIN is now BUILT.** A JOSM user with a
+Maprizon account can log in (Auth0 Authorization Code + PKCE, loopback redirect) to
+view **private imagery** — signed image bytes + private sequences — on top of the
+public data. Logged-out remains the default and fully-working state.
+
+**What's built (this branch):**
+- `oauth/ViewerAuth.java` — Authorization Code + PKCE (RFC 7636): builds the
+  /authorize URL, exchanges the code for tokens, silent refresh, token/email
+  persisted in JOSM prefs, login-state listeners, baked-in public client_id
+  (`CLIENT_ID` constant, pref override for dev). Bearer JWT is exactly what the
+  backend already accepts.
+- `oauth/LoginFlow.java` — opens the browser to Auth0 and runs a one-shot
+  `http://127.0.0.1:<port>/maprizon-callback` listener (loopback, RFC 8252) that
+  captures the redirect — no code typing, no copy-paste. Reached only from the
+  layer's **right-click menu → "Log in to Viewer (view private imagery)"** (and
+  "Log out" when signed in).
+- `io/ViewerApiClient` — now auth-aware: authed `POST /sequence/by-feature` when
+  logged in (private sequences), else `/sequence/public/by-feature`; plus
+  `resolveImageUrl()` → `POST /images/sign` (Bearer) for private image bytes. A
+  null token always falls back to the public path, so anonymous never breaks.
+- `gui/MaprizonImageDialog` — resolves each image via signing when logged in;
+  clears its cache + reloads on login/logout.
+
+**Verified against the live viewer backend (no server changes needed):**
+`POST /backend/api/images/sign` and authed `POST /backend/api/sequence/by-feature`
+both exist and are JWT-gated; Auth0 tenant `viewerdevelopment.us.auth0.com`,
+audience `https://Viewer/api/authorize`, RS256 (server `flaskr/auth/auth.py`,
+`views/Images.py`, `views/Sequence.py`).
+
+**Config (verified 2026-07-14):** tenant **`dev-p6r3cciondp4has2.us.auth0.com`**
+(confirmed as prod's tenant via the live `viewer.kaart.com/api/auth/login`
+redirect), audience `https://Viewer/api/authorize`, baked-in public client_id
+`u5qORFUqta4x7NnujJ83QVRIJL50JzOa` (`ViewerAuth.CLIENT_ID`). No client secret.
+
+**ONE remaining prerequisite (Auth0 dashboard — one-time by maintainer):** on that
+Native app, register the loopback callback URLs
+`http://127.0.0.1:{8765,8766,8767}/maprizon-callback` (currently unregistered — a
+probe returns "Callback URL mismatch"), and enable Offline Access on the
+`https://Viewer/api/authorize` API for refresh tokens.
+
+**Still NOT built — private COVERAGE on the map:** login unlocks viewing private
+images/sequences, but the map's coverage lines still come only from the public
+per-facing PMTiles (public imagery). Drawing *private* coverage lines needs a
+viewer-side private source (authed bbox→features endpoint or authed PMTiles) —
+see open dependency #2 below. This is a separate, later piece.
+
+---
+
+**Original plan (below) — PLAN ONLY (2026-07-13).** Viewer-side dependencies for the
+public-access ACL work are pending a conversation with Devin (public-map imagery
+reachability + his new timed-workers method); those do NOT affect the login above.
 
 ## Guiding requirement (from Chris)
 

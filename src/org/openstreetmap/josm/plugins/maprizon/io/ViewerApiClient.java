@@ -10,6 +10,7 @@ import jakarta.json.JsonString;
 import jakarta.json.JsonValue;
 
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
+import org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth;
 import org.openstreetmap.josm.tools.HttpClient;
 import org.openstreetmap.josm.tools.Logging;
 
@@ -23,11 +24,18 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Talks to the Kaart Viewer backend. Phase 1 is anonymous + public only: it
- * hits the JWT-exempt {@code /sequence/public/by-feature} endpoint (which the
- * server gates to {@code trips.public}), so no login is required to browse
- * public imagery. When plugin login lands, an authenticated variant + image
- * signing will be added alongside this.
+ * Talks to the Kaart Viewer backend, transparently anonymous OR authenticated:
+ * <ul>
+ *   <li><b>Logged out (default):</b> hits the JWT-exempt
+ *       {@code /sequence/public/by-feature} (server-gated to {@code trips.public}),
+ *       and uses raw public image URLs — no login required.</li>
+ *   <li><b>Logged in (opt-in):</b> hits the authed {@code /sequence/by-feature}
+ *       (serves private sequences) with a Bearer token, and resolves image bytes
+ *       via {@code POST /images/sign} so private imagery loads.</li>
+ * </ul>
+ * The choice is made per call from {@link ViewerAuth#getValidAccessToken()};
+ * a null token always falls back to the public path, so nothing here can break
+ * the anonymous experience.
  */
 public final class ViewerApiClient {
 
@@ -51,17 +59,20 @@ public final class ViewerApiClient {
     /**
      * Resolve the full ordered frame list for the sequence a clicked coverage
      * point belongs to (tiles are decimated, so the clicked tile only has a
-     * subset of the sequence). Uses the public endpoint; returns {@code null} on
-     * any failure (non-public trip, missing ids, network) so callers can fall
-     * back to just the clicked feature.
+     * subset of the sequence). When logged in, uses the authed endpoint (serves
+     * private sequences); otherwise the public one. Returns {@code null} on any
+     * failure (non-public trip while logged out, missing ids, network) so
+     * callers can fall back to just the clicked feature.
      */
-    public static SequenceResult fetchPublicSequence(ImageryFeature clicked) {
+    public static SequenceResult fetchSequence(ImageryFeature clicked) {
         String sequenceId = clicked.getSequenceId();
         String tripId = clicked.getTripId();
         String facing = clicked.getFacing();
         if (sequenceId == null || tripId == null || facing == null) {
             return null;
         }
+        String token = ViewerAuth.getInstance().getValidAccessToken();
+        String endpoint = token != null ? "sequence/by-feature" : "sequence/public/by-feature";
         try {
             JsonObjectBuilder props = Json.createObjectBuilder();
             addNumberOrString(props, "sequence_id", sequenceId);
@@ -87,15 +98,18 @@ public final class ViewerApiClient {
                     .toString()
                     .getBytes(StandardCharsets.UTF_8);
 
-            HttpClient.Response res = HttpClient
-                    .create(new URL(API_BASE + "sequence/public/by-feature"), "POST")
+            HttpClient client = HttpClient
+                    .create(new URL(API_BASE + endpoint), "POST")
                     .setHeader("Content-Type", "application/json")
                     .setHeader("Accept", "application/json")
-                    .setRequestBody(payload)
-                    .connect();
+                    .setRequestBody(payload);
+            if (token != null) {
+                client.setHeader("Authorization", "Bearer " + token);
+            }
+            HttpClient.Response res = client.connect();
 
             if (res.getResponseCode() != 200) {
-                Logging.warn("Maprizon: public/by-feature returned HTTP " + res.getResponseCode());
+                Logging.warn("Maprizon: " + endpoint + " returned HTTP " + res.getResponseCode());
                 return null;
             }
 
@@ -125,6 +139,53 @@ public final class ViewerApiClient {
         } catch (IOException | RuntimeException e) {
             Logging.warn("Maprizon: fetchPublicSequence failed: " + e);
             return null;
+        }
+    }
+
+    /**
+     * Resolve a stored image URL to fetchable bytes. When logged in, mints a
+     * short-lived pre-signed URL via {@code POST /images/sign} (works for private
+     * <i>and</i> public imagery). When logged out — or on any failure — returns
+     * the raw URL unchanged, so public imagery still loads and nothing errors.
+     *
+     * <p>Blocking (network); call off the EDT.
+     */
+    public static String resolveImageUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.isEmpty()) {
+            return rawUrl;
+        }
+        String token = ViewerAuth.getInstance().getValidAccessToken();
+        if (token == null) {
+            return rawUrl; // anonymous: public bytes straight from the raw URL
+        }
+        try {
+            byte[] payload = Json.createObjectBuilder()
+                    .add("img_url", rawUrl)
+                    .build()
+                    .toString()
+                    .getBytes(StandardCharsets.UTF_8);
+            HttpClient.Response res = HttpClient
+                    .create(new URL(API_BASE + "images/sign"), "POST")
+                    .setHeader("Authorization", "Bearer " + token)
+                    .setHeader("Content-Type", "application/json")
+                    .setHeader("Accept", "application/json")
+                    .setRequestBody(payload)
+                    .connect();
+            if (res.getResponseCode() != 200) {
+                // 403 = withheld/not-servable; anything else = transient. Fall back
+                // to raw (which may itself 403 for private, surfaced to the user).
+                Logging.warn("Maprizon: images/sign returned HTTP " + res.getResponseCode());
+                return rawUrl;
+            }
+            try (JsonReader reader = Json.createReader(
+                    new ByteArrayInputStream(res.fetchContent().getBytes(StandardCharsets.UTF_8)))) {
+                JsonObject root = reader.readObject();
+                String signed = root.getString("url", null);
+                return signed != null && !signed.isEmpty() ? signed : rawUrl;
+            }
+        } catch (IOException | RuntimeException e) {
+            Logging.warn("Maprizon: resolveImageUrl failed, using raw URL: " + e);
+            return rawUrl;
         }
     }
 

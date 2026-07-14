@@ -38,9 +38,11 @@ image in a browser.
   from JOSM back into Viewer.
 - **Changeset attribution**: coverage viewing carries no changeset/authorship
   linkage; this is a read-only visualization layer.
-- **Private-org coverage support**: only the *public* per-facing PMTiles files
-  are read. Private/org-restricted imagery is not supported in Phase 1 (no
-  auth flow exists in this plugin).
+- **Private coverage *lines* on the map**: the coverage layer is still drawn
+  only from the *public* per-facing PMTiles. Logging in (see "Optional login"
+  below) unlocks viewing private *images/sequences*, but private sequences do
+  not yet appear as clickable lines on the map — that needs a viewer-side
+  private coverage source (authed bbox→features endpoint or authed PMTiles).
 - On-demand, view-scoped coverage download is present but intentionally
   simple (see "Known limitations" below) - it is not a full vector-tile
   rendering engine.
@@ -224,6 +226,48 @@ when present on the clicked feature. Per spec, the `facing` query parameter
 only accepts `front`/`left`/`right`/`360` - **not** `still` - so for a `still`
 facing feature the `facing` parameter is simply omitted from the link (every
 other field is still included normally).
+
+## Optional login (view private imagery)
+
+By default the plugin is fully anonymous — public coverage + public images, no
+login. A JOSM user with a Maprizon account can **optionally** log in to also view
+**private** imagery (signed image bytes + private sequences):
+
+- Right-click the layer in the Layers panel → **"Log in to Viewer (view private
+  imagery)"**. This runs the OAuth 2.0 **Authorization Code flow with PKCE**
+  (RFC 7636) over a **loopback redirect** (RFC 8252): your browser opens to Auth0,
+  you approve, and it redirects straight back to a one-shot `http://127.0.0.1`
+  listener the plugin runs — **no code to type, no copy-paste**. No client secret
+  is stored (the public client_id is baked into the jar). "Log out of Viewer"
+  appears once signed in.
+- When logged in, sequence resolution uses the authed
+  `POST /backend/api/sequence/by-feature` (serves private trips) and image bytes
+  are fetched through `POST /backend/api/images/sign` (short-lived pre-signed
+  URLs). Logged out, both fall back to the public path automatically.
+- Tokens (access + refresh + expiry + email) are persisted via JOSM preferences,
+  so login survives restarts; the access token is refreshed silently before expiry.
+
+**One-time Auth0 setup (dashboard, not code — done by the maintainer, never the
+user):** a **Native** Auth0 application in the **`dev-p6r3cciondp4has2.us.auth0.com`**
+tenant (the tenant prod `viewer.kaart.com` validates against — verified via the live
+login redirect), with these **Allowed Callback URLs** registered (one per loopback
+port the plugin may bind):
+
+```
+http://127.0.0.1:8765/maprizon-callback
+http://127.0.0.1:8766/maprizon-callback
+http://127.0.0.1:8767/maprizon-callback
+```
+
+Its **public client_id is baked into the plugin** (`ViewerAuth.CLIENT_ID` —
+currently `u5qORFUqta4x7NnujJ83QVRIJL50JzOa`) — end users never see or enter it.
+(A dev can override via the `maprizon.auth0.clientId` preference without a
+rebuild.) Enable **Allow Offline Access** on the `https://Viewer/api/authorize`
+API so refresh tokens are issued.
+
+**Scope note:** login unlocks *viewing* private images/sequences, but private
+coverage *lines* are not yet drawn on the map (the coverage layer reads only the
+public PMTiles). That's a separate, viewer-side follow-up.
 
 ## Known limitations / honest gaps (read before relying on this for real work)
 

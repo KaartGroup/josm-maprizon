@@ -4,6 +4,7 @@ import org.openstreetmap.josm.gui.dialogs.ToggleDialog;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
 import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient;
 import org.openstreetmap.josm.plugins.maprizon.layer.MaprizonLayer;
+import org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth;
 import org.openstreetmap.josm.tools.HttpClient;
 import org.openstreetmap.josm.tools.Logging;
 import org.openstreetmap.josm.tools.Shortcut;
@@ -43,9 +44,10 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Docked side panel that shows the actual street-level image for a selected
  * Maprizon coverage point, and lets the user walk the sequence (prev/next,
- * arrow keys). Phase 1: anonymous + public imagery only — images are fetched
- * straight from their (public-read) DO Spaces URL. Signed/private fetching
- * arrives with plugin login.
+ * arrow keys). Anonymous by default (public images fetched straight from their
+ * public-read DO Spaces URL); when the user is logged in (see
+ * {@link org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth}), each image
+ * is resolved through the viewer's signing endpoint so private imagery loads too.
  *
  * <p>A single instance is registered per map frame; {@link #getInstance()} lets
  * the coverage layer's click handler drive it.
@@ -81,6 +83,10 @@ public final class MaprizonImageDialog extends ToggleDialog {
     /** Layer that originated the current selection, so we can move its on-map
      * marker to the frame being shown as the user walks the sequence. */
     private MaprizonLayer originatingLayer;
+
+    /** Clears the image cache + reloads the current frame when login state flips,
+     * so private imagery loads right after login (and stops after logout). */
+    private final Runnable authListener = this::onLoginStateChanged;
 
     public MaprizonImageDialog() {
         super("Maprizon Image",
@@ -126,10 +132,24 @@ public final class MaprizonImageDialog extends ToggleDialog {
         });
 
         createLayout(root, false, Collections.emptyList());
+        ViewerAuth.getInstance().addLoginStateListener(authListener);
     }
 
     public static MaprizonImageDialog getInstance() {
         return instance;
+    }
+
+    /** On login/logout: drop cached bytes and re-fetch the shown frame (now with
+     * or without signing). Safe to call from any thread. */
+    private void onLoginStateChanged() {
+        synchronized (cache) {
+            cache.clear();
+        }
+        SwingUtilities.invokeLater(() -> {
+            if (!frames.isEmpty()) {
+                display();
+            }
+        });
     }
 
     /**
@@ -144,7 +164,7 @@ public final class MaprizonImageDialog extends ToggleDialog {
         this.originatingLayer = layer;
         final long token = loadToken.incrementAndGet();
         exec.submit(() -> {
-            ViewerApiClient.SequenceResult result = ViewerApiClient.fetchPublicSequence(clicked);
+            ViewerApiClient.SequenceResult result = ViewerApiClient.fetchSequence(clicked);
             final List<ImageryFeature> seq;
             final int start;
             if (result != null) {
@@ -239,18 +259,25 @@ public final class MaprizonImageDialog extends ToggleDialog {
         }
         final long token = loadToken.incrementAndGet();
         exec.submit(() -> {
-            BufferedImage img = fetch(url);
+            // Resolve the raw (stored) URL to fetchable bytes: signed when logged
+            // in (private + public), raw otherwise. Cache stays keyed by the raw
+            // URL so it survives signed-URL expiry.
+            String fetchUrl = ViewerApiClient.resolveImageUrl(url);
+            BufferedImage img = fetch(fetchUrl);
             if (img != null) {
                 synchronized (cache) {
                     cache.put(url, img);
                 }
             }
+            final boolean loggedIn = ViewerAuth.getInstance().isLoggedIn();
             SwingUtilities.invokeLater(() -> {
                 if (token == loadToken.get()) {
                     imagePanel.setImage(img);
                     if (img == null) {
-                        status.setText("<html>Image unavailable"
-                                + "<br><span style='font-size:90%'>(may be private — login coming soon)</span></html>");
+                        status.setText(loggedIn
+                                ? "<html>Image unavailable</html>"
+                                : "<html>Image unavailable"
+                                + "<br><span style='font-size:90%'>(may be private — log in to Viewer to view)</span></html>");
                     }
                 }
             });
@@ -273,6 +300,7 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
     @Override
     public void destroy() {
+        ViewerAuth.getInstance().removeLoginStateListener(authListener);
         exec.shutdownNow();
         if (instance == this) {
             instance = null;
