@@ -99,8 +99,12 @@ public final class PmtilesTileLoader implements AutoCloseable {
             return null;
         }
 
+        // Decompress if the header says gzip OR the bytes carry the gzip magic
+        // (0x1f 0x8b) — never let a mis-declared compression drop a whole tile.
         byte[] mvtBytes = raw;
-        if (reader.getTileCompression() == Constants.COMPRESSION_GZIP) {
+        boolean gzip = reader.getTileCompression() == Constants.COMPRESSION_GZIP
+                || (raw.length >= 2 && (raw[0] & 0xFF) == 0x1f && (raw[1] & 0xFF) == 0x8b);
+        if (gzip) {
             mvtBytes = gunzip(raw);
         }
 
@@ -110,22 +114,42 @@ public final class PmtilesTileLoader implements AutoCloseable {
             mvt = MvtReader.loadMvt(is, gf, new TagKeyValueMapConverter());
         }
 
-        JtsLayer layer = mvt.getLayer(FacingStyle.VECTOR_LAYER_NAME);
-        if (layer == null) {
+        // Prefer the expected "imagery" layer, but if it is absent fall back to
+        // EVERY layer in the tile, so no facing is silently emptied because its
+        // layer happens to be named differently.
+        List<JtsLayer> layers = new ArrayList<>();
+        JtsLayer named = mvt.getLayer(FacingStyle.VECTOR_LAYER_NAME);
+        if (named != null) {
+            layers.add(named);
+        } else {
+            layers.addAll(mvt.getLayers());
+        }
+        if (layers.isEmpty()) {
             return java.util.Collections.emptyList();
         }
 
-        List<ImageryFeature> features = new ArrayList<>(layer.getGeometries().size());
-        int extent = layer.getExtent();
-        for (Geometry geom : layer.getGeometries()) {
-            List<double[]> points = toLonLat(geom, z, x, y, extent);
-            if (points.isEmpty()) {
-                continue;
+        List<ImageryFeature> features = new ArrayList<>();
+        for (JtsLayer layer : layers) {
+            int extent = layer.getExtent();
+            for (Geometry geom : layer.getGeometries()) {
+                // Split multi-part geometry (MultiLineString / GeometryCollection /
+                // MultiPoint) into its parts so several sequences packed into one
+                // MVT feature don't collapse into a single feature with a bogus
+                // connecting line — getCoordinates() would flatten them together.
+                Object userData = geom.getUserData();
+                @SuppressWarnings("unchecked")
+                Map<String, Object> props = userData instanceof Map
+                        ? (Map<String, Object>) userData : new HashMap<>();
+                int parts = geom.getNumGeometries();
+                for (int gi = 0; gi < parts; gi++) {
+                    Geometry part = geom.getGeometryN(gi);
+                    List<double[]> points = toLonLat(part, z, x, y, extent);
+                    if (points.isEmpty()) {
+                        continue;
+                    }
+                    features.add(new ImageryFeature(points, props, facing));
+                }
             }
-            Object userData = geom.getUserData();
-            @SuppressWarnings("unchecked")
-            Map<String, Object> props = userData instanceof Map ? (Map<String, Object>) userData : new HashMap<>();
-            features.add(new ImageryFeature(points, props, facing));
         }
         return features;
     }

@@ -136,7 +136,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "b8-diag";
+    private static final String BUILD_TAG = "b9-audit-fixes";
 
     /** Diagnostic log file (easily reachable): ~/maprizon-diag.log. Truncated at
      * the start of each explicit download, so `cat ~/maprizon-diag.log` always
@@ -461,7 +461,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         loadExecutor.submit(() -> {
             try {
                 refreshZoomBounds(); // blocking header read, but on the loader thread
-                int zoom = screenZoom(view, widthPx);
+                int zoom = cappedZoom(view, screenZoom(view, widthPx));
                 diagReset("==== MAPRIZON DOWNLOAD " + BUILD_TAG + " ====");
                 diag(String.format(Locale.ROOT,
                         "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b enabled=%s",
@@ -516,17 +516,16 @@ public class MaprizonLayer extends Layer implements MouseListener {
                                 continue;
                             }
                             try {
-                                acc.addAll(loadWithOverzoom(facing, zoom, tx, ty, ancestorCache));
+                                List<ImageryFeature> tileFeats =
+                                        loadWithOverzoom(facing, zoom, tx, ty, ancestorCache);
+                                acc.addAll(tileFeats);
                                 // Record the REQUESTED tile persistently so a later
-                                // download skips it. Safe ONLY because what we store
-                                // is the tile's FULL within-tile content (clipped to
-                                // the tile, never the view) — skipping loses nothing.
-                                // (Clipping to the VIEW here previously left
-                                // permanent holes: an overlapping later download
-                                // skipped the tile whose out-of-old-view content had
-                                // been discarded — the "only an edge strip renders"
-                                // bug.)
-                                loadedTileKeys.add(key);
+                                // download skips it — but ONLY if it actually yielded
+                                // features. An empty result must be retried on a later
+                                // download, not skipped forever.
+                                if (!tileFeats.isEmpty()) {
+                                    loadedTileKeys.add(key);
+                                }
                             } catch (IOException ioe) {
                                 Logging.warn("Maprizon: tile fetch failed " + key + ": " + ioe.getMessage());
                             }
@@ -612,15 +611,19 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
     /** Identity of a feature across tiles and downloads: facing + sequence id +
-     * vertex count + first/last vertex (rounded to ~1cm). Two clips of the same
-     * decoded geometry always produce the same key. */
+     * vertex count + a hash of all vertices (rounded to ~1cm). Two clips of the
+     * same decoded geometry always produce the same key. */
     private static String featureKey(String facing, ImageryFeature f) {
         List<double[]> pts = f.getPoints();
-        double[] a = pts.get(0);
-        double[] z = pts.get(pts.size() - 1);
-        return facing + '|' + f.getSequenceId() + '|' + pts.size() + '|'
-                + Math.round(a[0] * 1e7) + ',' + Math.round(a[1] * 1e7) + '|'
-                + Math.round(z[0] * 1e7) + ',' + Math.round(z[1] * 1e7);
+        // Hash EVERY vertex (not just first/last), so two distinct features that
+        // share facing + sequence id + vertex count + endpoints but differ in the
+        // middle cannot collide and silently dedup one away.
+        long h = 1469598103934665603L; // FNV-1a 64-bit offset basis
+        for (double[] p : pts) {
+            h = (h ^ Math.round(p[0] * 1e7)) * 1099511628211L;
+            h = (h ^ Math.round(p[1] * 1e7)) * 1099511628211L;
+        }
+        return facing + '|' + f.getSequenceId() + '|' + pts.size() + '|' + h;
     }
 
     /**
@@ -802,6 +805,37 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 Math.min(a[0], b[0]), Math.max(a[0], b[0]),
                 Math.min(a[1], b[1]), Math.max(a[1], b[1])
         };
+    }
+
+    /**
+     * The archive header advertises maxZoom=16 but tiles are baked shallower;
+     * requesting a zoom deeper than any tile exists forces every tile into
+     * overzoom + fine-tile clipping, which sheds most of a facing's data. Cap the
+     * requested zoom to the DEEPEST zoom that actually has a tile at the view
+     * centre for any enabled facing — measured, not assumed — so fetched tiles
+     * are native and clip losslessly. Never caps upward; if the centre is empty
+     * at every level it returns the input unchanged (no worse than before).
+     * Runs on the loader thread, where blocking range reads are fine.
+     */
+    private int cappedZoom(Bounds view, int zoom) {
+        double cLon = (view.getMinLon() + view.getMaxLon()) / 2.0;
+        double cLat = (view.getMinLat() + view.getMaxLat()) / 2.0;
+        for (int z = zoom; z >= archiveMinZoom(); z--) {
+            int[] t = TileMath.lonLatToTile(cLon, cLat, z);
+            for (String facing : FacingStyle.ALL_FACINGS) {
+                if (!enabledFacings.contains(facing)) {
+                    continue;
+                }
+                try {
+                    if (loader.loadTileOrNull(facing, z, t[0], t[1]) != null) {
+                        return z;
+                    }
+                } catch (IOException ignored) {
+                    // try the next facing / next zoom
+                }
+            }
+        }
+        return zoom;
     }
 
     /**

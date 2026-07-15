@@ -49,7 +49,13 @@ public final class FacingStyle {
         COLORS.put(STILL, new Color(0xFB, 0xC0, 0x2D));
     }
 
-    private static final String TILES_BASE = "https://viewer-tiles.sfo3.digitaloceanspaces.com/tiles/public_imagery-";
+    private static final String TILES_ENDPOINT = "https://viewer-tiles.sfo3.digitaloceanspaces.com/tiles";
+
+    /** Scope prefix for anonymous visitors — the public bake. Authenticated users
+     * read their org's bake ({@code <org_id>-<facing>.pmtiles}) instead, which is
+     * the SAME shape but a DIFFERENT (and more complete) file — the viewer does
+     * exactly this in useMapTileUrls. */
+    public static final String PUBLIC_SCOPE = "public_imagery";
 
     /** Name of the single vector layer present inside every per-facing PMTiles archive. */
     public static final String VECTOR_LAYER_NAME = "imagery";
@@ -62,7 +68,16 @@ public final class FacingStyle {
         return c != null ? c : Color.GRAY;
     }
 
+    /** Public bake URL (anonymous). */
     public static String pmtilesUrlFor(String facing) {
-        return TILES_BASE + facing + ".pmtiles";
+        return pmtilesUrlFor(facing, PUBLIC_SCOPE);
+    }
+
+    /** Per-facing PMTiles URL for a given scope: {@code public_imagery} for
+     * anonymous visitors, or an Auth0 org id (e.g. {@code org_9alzx7S32reIQ86s})
+     * for an authenticated org user — matching the viewer's per-facing tilesets. */
+    public static String pmtilesUrlFor(String facing, String scope) {
+        String s = (scope == null || scope.trim().isEmpty()) ? PUBLIC_SCOPE : scope.trim();
+        return TILES_ENDPOINT + "/" + s + "-" + facing + ".pmtiles";
     }
 }
