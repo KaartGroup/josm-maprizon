@@ -136,7 +136,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "b6-ribbons";
+    private static final String BUILD_TAG = "b8-diag";
+
+    /** Diagnostic log file (easily reachable): ~/maprizon-diag.log. Truncated at
+     * the start of each explicit download, so `cat ~/maprizon-diag.log` always
+     * shows exactly the last run's full fetch/merge/paint trace. */
+    private static final java.io.File DIAG_FILE =
+            new java.io.File(System.getProperty("user.home"), "maprizon-diag.log");
+
+    /** Set true right after a download merges, so the NEXT paint logs a one-shot
+     * snapshot of what is actually on screen (per facing: total + in-view). */
+    private volatile boolean diagPaintPending = false;
 
     /** REQUESTED tiles already fetched (key = facing/z/x/y), so re-downloading an
      * overlapping area skips work. Only sound because stored content is clipped
@@ -246,6 +256,36 @@ public class MaprizonLayer extends Layer implements MouseListener {
         if (lastNearestFeature != null && lastNearestPoint != null
                 && enabledFacings.contains(lastNearestFeature.getFacing())) {
             paintHighlight(g, mv);
+        }
+
+        // One-shot post-download snapshot: exactly what's on screen right now,
+        // per facing — total stored vs how many actually fall inside THIS view.
+        // The gap between "stored total" and "inView" is the whole diagnosis:
+        // stored>0 but inView=0 => coverage landed outside the view (placement);
+        // inView>0 but you see nothing => a render problem.
+        if (diagPaintPending) {
+            diagPaintPending = false;
+            diag(String.format(Locale.ROOT, "PAINT view lon[%.6f..%.6f] lat[%.6f..%.6f]",
+                    bbox.getMinLon(), bbox.getMaxLon(), bbox.getMinLat(), bbox.getMaxLat()));
+            for (String f : FacingStyle.ALL_FACINGS) {
+                List<ImageryFeature> feats = featuresByFacing.getOrDefault(f, Collections.emptyList());
+                int inView = 0;
+                for (ImageryFeature feat : feats) {
+                    boolean hit = false;
+                    for (double[] p : feat.getPoints()) {
+                        if (p[0] >= bbox.getMinLon() && p[0] <= bbox.getMaxLon()
+                                && p[1] >= bbox.getMinLat() && p[1] <= bbox.getMaxLat()) {
+                            hit = true;
+                            break;
+                        }
+                    }
+                    if (hit) {
+                        inView++;
+                    }
+                }
+                diag("  paint facing=" + f + " enabled=" + enabledFacings.contains(f)
+                        + " total=" + feats.size() + " inView=" + inView);
+            }
         }
     }
 
@@ -422,15 +462,31 @@ public class MaprizonLayer extends Layer implements MouseListener {
             try {
                 refreshZoomBounds(); // blocking header read, but on the loader thread
                 int zoom = screenZoom(view, widthPx);
+                diagReset("==== MAPRIZON DOWNLOAD " + BUILD_TAG + " ====");
+                diag(String.format(Locale.ROOT,
+                        "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b enabled=%s",
+                        view.getMinLon(), view.getMaxLon(), view.getMinLat(), view.getMaxLat(),
+                        widthPx, zoom, archiveMinZoom(), archiveMaxZoom(), enforceBudget, enabledFacings));
                 Map<String, int[]> rangesByFacing = new LinkedHashMap<>();
                 long totalNewTiles = 0;
                 for (String facing : FacingStyle.ALL_FACINGS) {
                     if (!enabledFacings.contains(facing)) {
+                        diag("plan facing=" + facing + " SKIPPED (disabled)");
                         continue;
                     }
                     int[] r = tileRange(view, zoom);
                     rangesByFacing.put(facing, r);
-                    totalNewTiles += countNewTiles(facing, zoom, r);
+                    long tiles = (long) (r[1] - r[0] + 1) * (r[3] - r[2] + 1);
+                    long newTiles = countNewTiles(facing, zoom, r);
+                    // Geographic extent the requested tile range covers, to compare
+                    // against the view bbox above (should match closely).
+                    double[] nw = tileBounds(zoom, r[0], r[2]); // {west,south,east,north}
+                    double[] se = tileBounds(zoom, r[1], r[3]);
+                    diag(String.format(Locale.ROOT,
+                            "plan facing=%s z=%d tileX[%d..%d] tileY[%d..%d] tiles=%d new=%d covers lon[%.6f..%.6f] lat[%.6f..%.6f]",
+                            facing, zoom, r[0], r[1], r[2], r[3], tiles, newTiles,
+                            nw[0], se[2], se[1], nw[3]));
+                    totalNewTiles += newTiles;
                 }
 
                 if (enforceBudget && totalNewTiles > MAX_TILES_PER_DOWNLOAD) {
@@ -477,6 +533,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         }
                     }
                     fetched.put(facing, acc);
+                    diag("fetched facing=" + facing + " " + bboxStr(acc));
                 }
 
                 final int reqZoom = zoom;
@@ -484,6 +541,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     // Merge dedups (a line spans many tiles); report what was ADDED
                     // per facing, so a download states exactly what it contributed.
                     Map<String, Integer> addedByFacing = merge(fetched);
+                    for (String f : FacingStyle.ALL_FACINGS) {
+                        List<ImageryFeature> stored = featuresByFacing.getOrDefault(f, Collections.emptyList());
+                        diag("stored facing=" + f + " added=" + addedByFacing.getOrDefault(f, 0)
+                                + " total=" + stored.size() + " " + bboxStr(stored));
+                    }
+                    diagPaintPending = true; // next paint logs the on-screen snapshot
                     invalidate();
                     int added = 0;
                     StringBuilder perFacing = new StringBuilder();
@@ -577,6 +640,53 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * a line spanning several requested tiles are collapsed later in
      * {@link #merge}.
      */
+    /** Truncate + start a fresh diagnostic log for one download run. */
+    private static void diagReset(String header) {
+        try {
+            java.nio.file.Files.write(DIAG_FILE.toPath(),
+                    (header + System.lineSeparator()).getBytes(StandardCharsets.UTF_8));
+        } catch (IOException ignored) {
+            // diagnostics are best-effort; never break a download over logging
+        }
+        Logging.info("MAPRIZON-DIAG " + header);
+    }
+
+    /** Append one diagnostic line to ~/maprizon-diag.log AND the JOSM log. */
+    private static void diag(String msg) {
+        try {
+            java.nio.file.Files.write(DIAG_FILE.toPath(),
+                    (msg + System.lineSeparator()).getBytes(StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException ignored) {
+            // best-effort
+        }
+        Logging.info("MAPRIZON-DIAG " + msg);
+    }
+
+    /** Feature count + total vertex count + the geographic bbox the features
+     * actually plot into — the key signal for "coverage landed miles from view". */
+    private static String bboxStr(List<ImageryFeature> feats) {
+        if (feats == null || feats.isEmpty()) {
+            return "EMPTY";
+        }
+        double minLon = 1e9;
+        double minLat = 1e9;
+        double maxLon = -1e9;
+        double maxLat = -1e9;
+        long pts = 0;
+        for (ImageryFeature f : feats) {
+            for (double[] p : f.getPoints()) {
+                minLon = Math.min(minLon, p[0]);
+                maxLon = Math.max(maxLon, p[0]);
+                minLat = Math.min(minLat, p[1]);
+                maxLat = Math.max(maxLat, p[1]);
+                pts++;
+            }
+        }
+        return String.format(Locale.ROOT, "n=%d pts=%d lon[%.6f..%.6f] lat[%.6f..%.6f]",
+                feats.size(), pts, minLon, maxLon, minLat, maxLat);
+    }
+
     private List<ImageryFeature> loadWithOverzoom(String facing, int zoom, int tx, int ty,
                                                   Map<String, List<ImageryFeature>> ancestorCache) throws IOException {
         int az = zoom;
@@ -584,6 +694,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
         int ay = ty;
         int minZoom = archiveMinZoom();
         List<ImageryFeature> best = Collections.emptyList();
+        int bestZoom = -1;
+        StringBuilder presence = new StringBuilder(); // per-level: zN=raw/clip or zN=.
         for (int step = 0; step <= MAX_OVERZOOM_STEPS && az >= minZoom; step++) {
             String ancestorKey = tileKey(facing, az, ax, ay);
             List<ImageryFeature> features;
@@ -595,17 +707,27 @@ public class MaprizonLayer extends Layer implements MouseListener {
             }
             if (features != null) {
                 List<ImageryFeature> clipped = clipToTile(features, zoom, tx, ty);
+                presence.append(" z").append(az).append('=').append(features.size())
+                        .append('/').append(clipped.size());
                 // Strictly-greater: on ties the DEEPER level (seen first) wins,
                 // favoring finer geometry.
                 if (clipped.size() > best.size()) {
                     best = clipped;
+                    bestZoom = az;
                 }
+            } else {
+                presence.append(" z").append(az).append("=.");
             }
             // Continue up the chain regardless — a coarser level may be denser.
             az -= 1;
             ax >>= 1;
             ay >>= 1;
         }
+        // Per requested tile: which zoom levels had a tile (raw/clipped counts),
+        // which level won, and how much survived the clip. Reveals coarse-facing
+        // clip-to-zero and any placement surprises. One line per fetched tile.
+        diag("  ozoom facing=" + facing + " req z" + zoom + "/" + tx + "/" + ty
+                + " levels[" + presence.toString().trim() + "] wonZ=" + bestZoom + " kept=" + best.size());
         return best;
     }
 
