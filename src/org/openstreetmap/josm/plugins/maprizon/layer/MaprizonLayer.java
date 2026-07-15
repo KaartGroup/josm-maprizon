@@ -136,7 +136,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "b7-coarsefill";
+    private static final String BUILD_TAG = "b6-ribbons";
 
     /** REQUESTED tiles already fetched (key = facing/z/x/y), so re-downloading an
      * overlapping area skips work. Only sound because stored content is clipped
@@ -584,19 +584,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
         int ay = ty;
         int minZoom = archiveMinZoom();
         List<ImageryFeature> best = Collections.emptyList();
-        // The finest (highest-zoom) ancestor that actually has a tile, and the
-        // tile coords it came from. Facings bake to DIFFERENT max depths (right
-        // ~z15, front/left/360 ~z12 here); when the requested zoom is finer than
-        // a facing's deepest tile, its coarse features almost never intersect the
-        // tiny requested tile, so the fine clip below comes back EMPTY and the
-        // facing vanishes ("only right shows up"). We keep the finest present
-        // ancestor as a fallback and, if the fine clip yields nothing, return it
-        // clipped to ITS OWN (coarser) tile so the coverage still renders. merge()
-        // dedups the repeats a coarse tile produces across sibling requests.
-        List<ImageryFeature> finestPresent = null;
-        int fpz = 0;
-        int fpx = 0;
-        int fpy = 0;
         for (int step = 0; step <= MAX_OVERZOOM_STEPS && az >= minZoom; step++) {
             String ancestorKey = tileKey(facing, az, ax, ay);
             List<ImageryFeature> features;
@@ -607,13 +594,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 ancestorCache.put(ancestorKey, features);
             }
             if (features != null) {
-                if (finestPresent == null) {
-                    // First present tile walking up = the finest available <= zoom.
-                    finestPresent = features;
-                    fpz = az;
-                    fpx = ax;
-                    fpy = ay;
-                }
                 List<ImageryFeature> clipped = clipToTile(features, zoom, tx, ty);
                 // Strictly-greater: on ties the DEEPER level (seen first) wins,
                 // favoring finer geometry.
@@ -625,11 +605,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
             az -= 1;
             ax >>= 1;
             ay >>= 1;
-        }
-        if (best.isEmpty() && finestPresent != null) {
-            // Coarse-only facing: nothing survived the fine clip. Serve the finest
-            // ancestor at its own resolution so its coverage is visible at all.
-            return clipToTile(finestPresent, fpz, fpx, fpy);
         }
         return best;
     }
