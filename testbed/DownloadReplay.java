@@ -98,6 +98,8 @@ public class DownloadReplay {
                                                  Map<String, List<ImageryFeature>> cache) throws Exception {
         int az = zoom, ax = tx, ay = ty;
         List<ImageryFeature> best = new ArrayList<>();
+        List<ImageryFeature> finestPresent = null;
+        int fpz = 0, fpx = 0, fpy = 0;
         for (int step = 0; step <= MAX_OVERZOOM_STEPS && az >= MIN_ZOOM; step++) {
             String ancestorKey = facing + "/" + az + "/" + ax + "/" + ay;
             List<ImageryFeature> features;
@@ -108,10 +110,14 @@ public class DownloadReplay {
                 cache.put(ancestorKey, features);
             }
             if (features != null) {
+                if (finestPresent == null) { finestPresent = features; fpz = az; fpx = ax; fpy = ay; }
                 List<ImageryFeature> clipped = clipToTile(features, zoom, tx, ty);
                 if (clipped.size() > best.size()) { best = clipped; }
             }
             az -= 1; ax >>= 1; ay >>= 1;
+        }
+        if (best.isEmpty() && finestPresent != null) {
+            return clipToTile(finestPresent, fpz, fpx, fpy);
         }
         return best;
     }
