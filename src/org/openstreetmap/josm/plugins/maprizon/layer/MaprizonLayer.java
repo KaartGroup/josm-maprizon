@@ -90,14 +90,19 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /**
      * Max levels to walk UP (to parent tiles) when the tile at the requested
      * zoom doesn't exist in the archive — i.e. overzoom. The archives advertise
-     * maxZoom=16 in their header but only bake tiles down to z15, so a zoomed-in
-     * request for z16 returns nothing; falling back to the z15 parent renders the
-     * deepest real coverage instead of a "no coverage" modal. BOUNDED so a
-     * street-level view can never collapse all the way to a low-zoom world tile
-     * (which would pull thousands of features — the scale rule). 3 levels covers
-     * the header-vs-real gap plus moderate sparsity.
+     * maxZoom=16 in their header but bake NO z16 tiles, so a zoomed-in request for
+     * z16 always misses on the first step (wasting it). Worse, different facings
+     * are baked to different depths: `right` coverage begins at ~z15, but
+     * `front`/`left`/`360` coverage for the same spot can begin only at ~z12.
+     * With too small a budget the walk stops before reaching z12, so those facings
+     * come back EMPTY while `right` renders — the "only right shows up" bug
+     * (verified: budget 3 → front/left/360 = 0; budget 4 → all four populate).
+     * So the budget must bridge z16→~z12 with margin. BOUNDED (not down to world
+     * zoom) so a spot with genuinely no coverage can't collapse to a huge low-zoom
+     * tile — the scale rule — and clip-to-view keeps the coarse parent's geometry
+     * from spilling outside the downloaded area.
      */
-    private static final int MAX_OVERZOOM_STEPS = 3;
+    private static final int MAX_OVERZOOM_STEPS = 6;
 
     private final PmtilesTileLoader loader = new PmtilesTileLoader();
     private final ExecutorService loadExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -126,9 +131,22 @@ public class MaprizonLayer extends Layer implements MouseListener {
      */
     private volatile Map<String, List<ImageryFeature>> featuresByFacing = new HashMap<>();
 
-    /** Tiles already fetched (key = facing/z/x/y), so re-downloading an overlapping
-     * area skips work. Concurrent: read on the loader thread, added on the EDT. */
+    /**
+     * Shown in the download notification + log so it is always self-evident WHICH
+     * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
+     * stale jar silently runs old code otherwise). Bump on behavior changes.
+     */
+    private static final String BUILD_TAG = "b6-ribbons";
+
+    /** REQUESTED tiles already fetched (key = facing/z/x/y), so re-downloading an
+     * overlapping area skips work. Only sound because stored content is clipped
+     * per requested tile (never to the view) — a skipped tile never hides data.
+     * Concurrent: read + written on the loader thread, cleared on the EDT. */
     private final Set<String> loadedTileKeys = ConcurrentHashMap.newKeySet();
+
+    /** Keys of every stored feature (see {@link #featureKey}) for cross-tile,
+     * cross-download dedup in {@link #merge}. EDT-mutated; cleared with coverage. */
+    private final Set<String> storedFeatureKeys = ConcurrentHashMap.newKeySet();
 
     private final AtomicBoolean loading = new AtomicBoolean(false);
 
@@ -149,6 +167,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private static final int POINT_RADIUS = 3;
     /** Highlight ring radius for the selected feature's clicked point, in px. */
     private static final int SELECTED_RADIUS = 8;
+    /** Perpendicular spacing (px) between adjacent facings' ribbons. The four
+     * drive facings share ONE physical GPS trace (one vehicle, four cameras),
+     * so their geometries are coincident; drawn stacked, the last/densest facing
+     * (right) hides the rest. Offsetting each facing sideways by a multiple of
+     * this step renders them as parallel colored ribbons — order-independent,
+     * every facing stays visible regardless of density. Sized just over the
+     * casing width (LINE_WIDTH + 2) so colored cores separate cleanly. */
+    private static final float RIBBON_STEP_PX = 4.5f;
     /** Max screen-space distance (px) from a click to a feature for it to count
      * as selected — zoom-independent, so a click in empty space selects nothing. */
     private static final double SELECT_PIXEL_THRESHOLD = 18.0;
@@ -200,8 +226,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
             if (!enabledFacings.contains(entry.getKey())) {
                 continue;
             }
+            float offsetPx = facingOffsetPx(entry.getKey());
             for (ImageryFeature feature : entry.getValue()) {
-                paintCasing(g, mv, feature);
+                paintCasing(g, mv, feature, offsetPx);
             }
         }
         for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
@@ -209,8 +236,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 continue;
             }
             Color color = FacingStyle.colorFor(entry.getKey());
+            float offsetPx = facingOffsetPx(entry.getKey());
             for (ImageryFeature feature : entry.getValue()) {
-                paintColor(g, mv, feature, color);
+                paintColor(g, mv, feature, color, offsetPx);
             }
         }
 
@@ -221,20 +249,75 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
     }
 
-    private Point[] toScreen(MapView mv, ImageryFeature feature) {
+    /** Per-facing sideways offset (px) applied perpendicular to travel, so the
+     * four coincident drive facings render as parallel ribbons instead of
+     * stacking. Symmetric about the true trace; {@code still} (loose points)
+     * stays centered. See {@link #RIBBON_STEP_PX}. */
+    private static float facingOffsetPx(String facing) {
+        switch (facing) {
+            case FacingStyle.FRONT:      return -1.5f * RIBBON_STEP_PX;
+            case FacingStyle.LEFT:       return -0.5f * RIBBON_STEP_PX;
+            case FacingStyle.RIGHT:      return  0.5f * RIBBON_STEP_PX;
+            case FacingStyle.FACING_360: return  1.5f * RIBBON_STEP_PX;
+            default:                     return  0f; // still
+        }
+    }
+
+    /**
+     * Project a feature's lon/lat vertices to screen, then shift each vertex
+     * {@code offsetPx} perpendicular to the local travel direction. Coincident
+     * facings thus separate into parallel ribbons; a zero offset returns the
+     * unshifted projection. For a lone point (no direction) the offset is applied
+     * horizontally so stacked single-image markers still fan out.
+     */
+    private Point[] toScreen(MapView mv, ImageryFeature feature, float offsetPx) {
         List<double[]> pts = feature.getPoints();
-        Point[] screen = new Point[pts.size()];
+        Point[] base = new Point[pts.size()];
         for (int i = 0; i < pts.size(); i++) {
             double[] lonLat = pts.get(i);
-            screen[i] = mv.getPoint(new LatLon(lonLat[1], lonLat[0]));
+            base[i] = mv.getPoint(new LatLon(lonLat[1], lonLat[0]));
         }
-        return screen;
+        if (offsetPx == 0f || base.length == 0) {
+            return base;
+        }
+        if (base.length == 1) {
+            return new Point[]{new Point(base[0].x + Math.round(offsetPx), base[0].y)};
+        }
+        Point[] out = new Point[base.length];
+        for (int i = 0; i < base.length; i++) {
+            // Local direction from the neighboring segment(s): the incoming +
+            // outgoing chord at interior vertices, the single segment at ends.
+            double dx;
+            double dy;
+            if (i == 0) {
+                dx = base[1].x - base[0].x;
+                dy = base[1].y - base[0].y;
+            } else if (i == base.length - 1) {
+                dx = base[i].x - base[i - 1].x;
+                dy = base[i].y - base[i - 1].y;
+            } else {
+                dx = base[i + 1].x - base[i - 1].x;
+                dy = base[i + 1].y - base[i - 1].y;
+            }
+            double len = Math.hypot(dx, dy);
+            if (len < 1e-6) {
+                out[i] = new Point(base[i].x, base[i].y);
+            } else {
+                // Left-hand normal (-dy, dx), normalized, scaled by the offset.
+                double nx = -dy / len;
+                double ny = dx / len;
+                out[i] = new Point(
+                        (int) Math.round(base[i].x + nx * offsetPx),
+                        (int) Math.round(base[i].y + ny * offsetPx));
+            }
+        }
+        return out;
     }
 
     /** Pass 1: black casing under the line + black outline under each point, so
      * light colours (esp. white front) stay visible — mirrors the viewer. */
-    private void paintCasing(Graphics2D g, MapView mv, ImageryFeature feature) {
-        Point[] screen = toScreen(mv, feature);
+    private void paintCasing(Graphics2D g, MapView mv, ImageryFeature feature, float offsetPx) {
+        Point[] screen = toScreen(mv, feature, offsetPx);
         g.setColor(Color.BLACK);
         if (screen.length > 1) {
             g.setStroke(new BasicStroke(LINE_WIDTH + 2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
@@ -247,8 +330,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
     /** Pass 2: the facing-coloured line + point on top of the casing. */
-    private void paintColor(Graphics2D g, MapView mv, ImageryFeature feature, Color color) {
-        Point[] screen = toScreen(mv, feature);
+    private void paintColor(Graphics2D g, MapView mv, ImageryFeature feature, Color color, float offsetPx) {
+        Point[] screen = toScreen(mv, feature, offsetPx);
         g.setColor(color);
         if (screen.length > 1) {
             g.setStroke(new BasicStroke(LINE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
@@ -313,6 +396,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Drop all downloaded coverage (start fresh). */
     public void clearCoverage() {
         loadedTileKeys.clear();
+        storedFeatureKeys.clear();
         featuresByFacing = new HashMap<>();
         lastAutoBounds = null;
         lastAutoZoom = -1;
@@ -356,7 +440,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 }
 
                 Map<String, List<ImageryFeature>> fetched = new HashMap<>();
-                int newFeatures = 0;
+                // Per-run cache of decoded (possibly ancestor) tiles: one decode
+                // serves every requested tile that overzooms onto it — each
+                // requested tile then clips ITS OWN slice out of it. Misses (null)
+                // are cached too, so absent z16 tiles aren't re-probed per sibling.
+                // Deliberately LOCAL to this run: since content is clipped per
+                // REQUESTED tile (never to the view), the persistent ledger's
+                // "tile done" is always the whole truth, and a later adjacent
+                // download simply re-decodes the ancestor for its own tiles.
+                Map<String, List<ImageryFeature>> ancestorCache = new HashMap<>();
                 for (Map.Entry<String, int[]> e : rangesByFacing.entrySet()) {
                     String facing = e.getKey();
                     int[] r = e.getValue();
@@ -368,18 +460,16 @@ public class MaprizonLayer extends Layer implements MouseListener {
                                 continue;
                             }
                             try {
-                                acc.addAll(loadWithOverzoom(facing, zoom, tx, ty));
-                                // Record the REQUESTED tile as loaded ONLY on
-                                // success, HERE on the loader thread (not deferred
-                                // to the EDT merge): the single-thread executor
-                                // guarantees this download's ledger is complete
-                                // before the next one plans, so overlapping
-                                // downloads never re-fetch or double-count. A tile
-                                // that threw stays absent from the ledger ->
-                                // retriable. (loadWithOverzoom separately records
-                                // the ANCESTOR tile it actually served, so sibling
-                                // requests that collapse onto the same parent skip
-                                // the decode instead of duplicating its features.)
+                                acc.addAll(loadWithOverzoom(facing, zoom, tx, ty, ancestorCache));
+                                // Record the REQUESTED tile persistently so a later
+                                // download skips it. Safe ONLY because what we store
+                                // is the tile's FULL within-tile content (clipped to
+                                // the tile, never the view) — skipping loses nothing.
+                                // (Clipping to the VIEW here previously left
+                                // permanent holes: an overlapping later download
+                                // skipped the tile whose out-of-old-view content had
+                                // been discarded — the "only an edge strip renders"
+                                // bug.)
                                 loadedTileKeys.add(key);
                             } catch (IOException ioe) {
                                 Logging.warn("Maprizon: tile fetch failed " + key + ": " + ioe.getMessage());
@@ -387,17 +477,34 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         }
                     }
                     fetched.put(facing, acc);
-                    newFeatures += acc.size();
                 }
 
-                final int added = newFeatures;
+                final int reqZoom = zoom;
                 SwingUtilities.invokeLater(() -> {
-                    merge(fetched);
+                    // Merge dedups (a line spans many tiles); report what was ADDED
+                    // per facing, so a download states exactly what it contributed.
+                    Map<String, Integer> addedByFacing = merge(fetched);
                     invalidate();
+                    int added = 0;
+                    StringBuilder perFacing = new StringBuilder();
+                    for (String f : FacingStyle.ALL_FACINGS) {
+                        Integer n = addedByFacing.get(f);
+                        if (n != null) {
+                            perFacing.append(f).append("=").append(n).append("  ");
+                            added += n;
+                        }
+                    }
+                    Logging.info("Maprizon " + BUILD_TAG + " download z" + reqZoom + " added: " + perFacing);
+                    if (userInitiated) {
+                        new Notification("<html><b>Maprizon download</b> (z" + reqZoom + ", " + BUILD_TAG + ")<br>"
+                                + perFacing + "</html>")
+                                .setDuration(Notification.TIME_LONG).show();
+                    }
                     if (userInitiated && added == 0) {
                         JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
-                                "No Maprizon coverage found in this view.\n" +
-                                        "Try a different area, or zoom to a place with recent captures.",
+                                "No new Maprizon coverage was added for this view.\n" +
+                                        "Already-downloaded tiles are skipped — use \"Clear downloaded\n" +
+                                        "coverage\" (layer menu) to refetch, or try a different area.",
                                 "Maprizon", JOptionPane.INFORMATION_MESSAGE);
                     }
                 });
@@ -409,18 +516,48 @@ public class MaprizonLayer extends Layer implements MouseListener {
         });
     }
 
-    /** Merge freshly fetched features into the accumulated store. EDT only.
+    /**
+     * Merge freshly fetched features into the accumulated store, deduplicating
+     * against everything already stored. Duplicates are normal now: a sequence
+     * line spanning several requested tiles is clipped-in by EACH of them, and a
+     * later download can re-decode the same coarse ancestor for its own tiles.
+     * Returns the number of features actually ADDED per facing. EDT only.
      * (The tile ledger {@code loadedTileKeys} is updated on the loader thread as
-     * tiles are fetched, not here — see {@link #submitDownload}.) */
-    private void merge(Map<String, List<ImageryFeature>> fetched) {
+     * tiles are fetched, not here — see {@link #submitDownload}.)
+     */
+    private Map<String, Integer> merge(Map<String, List<ImageryFeature>> fetched) {
         Map<String, List<ImageryFeature>> next = new HashMap<>(featuresByFacing);
+        Map<String, Integer> addedByFacing = new LinkedHashMap<>();
         for (Map.Entry<String, List<ImageryFeature>> e : fetched.entrySet()) {
             List<ImageryFeature> combined = new ArrayList<>(
                     next.getOrDefault(e.getKey(), Collections.emptyList()));
-            combined.addAll(e.getValue());
+            int added = 0;
+            for (ImageryFeature f : e.getValue()) {
+                if (f.getPoints().isEmpty()) {
+                    continue;
+                }
+                if (storedFeatureKeys.add(featureKey(e.getKey(), f))) {
+                    combined.add(f);
+                    added++;
+                }
+            }
             next.put(e.getKey(), combined);
+            addedByFacing.put(e.getKey(), added);
         }
         featuresByFacing = next;
+        return addedByFacing;
+    }
+
+    /** Identity of a feature across tiles and downloads: facing + sequence id +
+     * vertex count + first/last vertex (rounded to ~1cm). Two clips of the same
+     * decoded geometry always produce the same key. */
+    private static String featureKey(String facing, ImageryFeature f) {
+        List<double[]> pts = f.getPoints();
+        double[] a = pts.get(0);
+        double[] z = pts.get(pts.size() - 1);
+        return facing + '|' + f.getSequenceId() + '|' + pts.size() + '|'
+                + Math.round(a[0] * 1e7) + ',' + Math.round(a[1] * 1e7) + '|'
+                + Math.round(z[0] * 1e7) + ',' + Math.round(z[1] * 1e7);
     }
 
     /**
@@ -430,34 +567,93 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * what makes zoomed-in views render — the archives declare maxZoom=16 but only
      * bake to z15, so the requested z16 tile is absent and we fall back to z15.
      *
-     * <p>Records the ANCESTOR tile actually served in {@link #loadedTileKeys}, and
-     * returns an empty list (skipping the decode) when a sibling request already
-     * served that same ancestor — so several requested tiles collapsing onto one
-     * parent never duplicate its features.
+     * <p>Decodes each level's tile ONCE per download via {@code ancestorCache}
+     * (misses cached as null), clips each present level's features to the
+     * REQUESTED tile's own bounds, and keeps the level with the MOST in-tile
+     * features. "First present tile wins" is NOT safe: a facing can have a
+     * present-but-nearly-empty fine tile shadowing a dense coarser one (observed
+     * live: front z13 tile = 16 features while its z12 parent = 3188 — stopping
+     * at z13 rendered crumbs and made the facing look missing). Duplicates from
+     * a line spanning several requested tiles are collapsed later in
+     * {@link #merge}.
      */
-    private List<ImageryFeature> loadWithOverzoom(String facing, int zoom, int tx, int ty) throws IOException {
+    private List<ImageryFeature> loadWithOverzoom(String facing, int zoom, int tx, int ty,
+                                                  Map<String, List<ImageryFeature>> ancestorCache) throws IOException {
         int az = zoom;
         int ax = tx;
         int ay = ty;
         int minZoom = archiveMinZoom();
+        List<ImageryFeature> best = Collections.emptyList();
         for (int step = 0; step <= MAX_OVERZOOM_STEPS && az >= minZoom; step++) {
-            String servedKey = tileKey(facing, az, ax, ay);
-            if (loadedTileKeys.contains(servedKey)) {
-                // A sibling already fetched this ancestor; its features are in the
-                // store — don't add them again.
-                return Collections.emptyList();
+            String ancestorKey = tileKey(facing, az, ax, ay);
+            List<ImageryFeature> features;
+            if (ancestorCache.containsKey(ancestorKey)) {
+                features = ancestorCache.get(ancestorKey); // may be a cached MISS (null)
+            } else {
+                features = loader.loadTileOrNull(facing, az, ax, ay);
+                ancestorCache.put(ancestorKey, features);
             }
-            List<ImageryFeature> features = loader.loadTileOrNull(facing, az, ax, ay);
             if (features != null) {
-                loadedTileKeys.add(servedKey);
-                return features;
+                List<ImageryFeature> clipped = clipToTile(features, zoom, tx, ty);
+                // Strictly-greater: on ties the DEEPER level (seen first) wins,
+                // favoring finer geometry.
+                if (clipped.size() > best.size()) {
+                    best = clipped;
+                }
             }
-            // Tile absent at this level -> step up to the parent tile.
+            // Continue up the chain regardless — a coarser level may be denser.
             az -= 1;
             ax >>= 1;
             ay >>= 1;
         }
-        return Collections.emptyList();
+        return best;
+    }
+
+    /** Bounds of slippy tile (zoom, x, y) as {west, south, east, north}. */
+    private static double[] tileBounds(int zoom, int x, int y) {
+        double west = TileMath.tileLocalXToLon(x, zoom, 0, 1);
+        double east = TileMath.tileLocalXToLon(x, zoom, 1, 1);
+        double north = TileMath.tileLocalYToLat(y, zoom, 0, 1);
+        double south = TileMath.tileLocalYToLat(y, zoom, 1, 1);
+        return new double[]{west, south, east, north};
+    }
+
+    /**
+     * Keep only features whose geographic extent intersects the REQUESTED tile.
+     * Overzoom serves a (much coarser) ancestor tile covering far more ground
+     * than the requested tile; without clipping, its features would spill far
+     * outside the downloaded area. Clipping to the requested tile (rather than
+     * the view) keeps the persistent tile ledger truthful: "tile done" always
+     * means its full within-tile content is stored, so overlapping later
+     * downloads can safely skip it. Bbox-intersection (not vertex containment)
+     * so a sequence line crossing the tile is kept; the resulting duplicates
+     * across adjacent tiles are collapsed in {@link #merge}.
+     */
+    private static List<ImageryFeature> clipToTile(List<ImageryFeature> features, int zoom, int x, int y) {
+        double[] b = tileBounds(zoom, x, y);
+        double minLon = b[0];
+        double minLat = b[1];
+        double maxLon = b[2];
+        double maxLat = b[3];
+        List<ImageryFeature> kept = new ArrayList<>(features.size());
+        for (ImageryFeature f : features) {
+            double fMinLon = Double.MAX_VALUE;
+            double fMaxLon = -Double.MAX_VALUE;
+            double fMinLat = Double.MAX_VALUE;
+            double fMaxLat = -Double.MAX_VALUE;
+            for (double[] p : f.getPoints()) {
+                fMinLon = Math.min(fMinLon, p[0]);
+                fMaxLon = Math.max(fMaxLon, p[0]);
+                fMinLat = Math.min(fMinLat, p[1]);
+                fMaxLat = Math.max(fMaxLat, p[1]);
+            }
+            boolean intersects = fMaxLon >= minLon && fMinLon <= maxLon
+                    && fMaxLat >= minLat && fMinLat <= maxLat;
+            if (intersects) {
+                kept.add(f);
+            }
+        }
+        return kept;
     }
 
     private long countNewTiles(String facing, int zoom, int[] r) {

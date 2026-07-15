@@ -2,6 +2,7 @@ package org.openstreetmap.josm.plugins.maprizon.data;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -19,7 +20,12 @@ public final class ImageryFeature {
     public ImageryFeature(List<double[]> points, Map<String, Object> properties, String facing) {
         this.points = Collections.unmodifiableList(points);
         this.properties = properties == null ? Collections.emptyMap() : properties;
-        this.facing = facing;
+        // Single chokepoint: every facing is normalized to lowercase here, so all
+        // case-sensitive consumers (FacingStyle.colorFor / DEEP_LINK_FACINGS,
+        // MaprizonLayer.enabledFacings) match regardless of how the source (tile
+        // decode vs viewer API response) cased it. Tile decode already passes
+        // lowercase; this guards the API-parsed path.
+        this.facing = facing == null ? null : facing.toLowerCase(Locale.ROOT);
     }
 
     public List<double[]> getPoints() {
