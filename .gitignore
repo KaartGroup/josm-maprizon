@@ -4,3 +4,11 @@ dist/
 !lib/*.jar
 testbed/out/
 *.class
+
+# JOSM core: compile-only, fetched separately (see README), never committed
+lib/josm-custom.jar
+
+# Throwaway dev probes — kept locally, not shipped
+testbed/
+
+.DS_Store

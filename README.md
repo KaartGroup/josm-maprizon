@@ -49,9 +49,17 @@ image in a browser.
 
 ## Build / install
 
-Prerequisites: Java 8+ JDK (built and tested here against a JDK 21 `javac`
-using `-source 8 -target 8`, which still works - just emits "obsolete option"
-deprecation warnings) and Apache Ant.
+Prerequisites: JDK 17+ and Apache Ant. The plugin compiles to Java 17 bytecode
+and targets JOSM 19481+.
+
+**Compile-only dependency — JOSM core.** `lib/josm-custom.jar` (JOSM itself) is
+NOT tracked in git — it's provided by the JOSM runtime and only needed to
+compile against. Download the current JOSM jar and drop it in as
+`lib/josm-custom.jar` before building:
+
+```bash
+curl -fSL https://josm.openstreetmap.de/download/josm-tested.jar -o lib/josm-custom.jar
+```
 
 ```bash
 # Build the plugin jar (Maprizon.jar)
@@ -62,9 +70,9 @@ ant clean dist
 ant install
 ```
 
-Then restart JOSM. The plugin should appear under
-`Preferences -> Plugins` as "Maprizon", and a "Maprizon Coverage" entry
-appears in the Tools menu.
+Then restart JOSM. The plugin appears under `Preferences -> Plugins` as
+"Maprizon", and a dedicated **Maprizon** menu is added to the menu bar with
+"Maprizon Coverage" (toggle layer) and "Download Maprizon coverage" entries.
 
 ## Architecture
 
