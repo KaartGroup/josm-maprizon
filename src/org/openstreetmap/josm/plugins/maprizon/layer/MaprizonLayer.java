@@ -511,7 +511,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     /** Draw a prominent ring + facing-coloured dot at the currently selected
      * feature's clicked point, so a click gives visible confirmation of what is
-     * selected (and thus what "View in Maprizon" / double-click will open). */
+     * selected (and thus what "View in Maprizon" will open). */
     private void paintHighlight(Graphics2D g, MapView mv) {
         Point p = mv.getPoint(new LatLon(lastNearestPoint[1], lastNearestPoint[0]));
         // View cone first, so the selection ring/dot stay on top of it.
@@ -1229,20 +1229,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
         coneBearingDeg = null;
         cone360 = false;
         invalidate();
-        if (e.getClickCount() >= 2) {
-            // Double-click still opens the web viewer (deep link) as a convenience.
-            openInMaprizon();
+        // A click shows the image IN JOSM. Opening the web viewer is a right-click
+        // menu action ("View in Maprizon") only — a double-click no longer launches
+        // a browser.
+        MaprizonImageDialog dialog = MaprizonImageDialog.getInstance();
+        if (dialog != null) {
+            dialog.showForClickedFeature(nearest.feature, nearest.point, this);
         } else {
-            // Single click shows the actual image IN JOSM (Phase 1 image viewer).
-            MaprizonImageDialog dialog = MaprizonImageDialog.getInstance();
-            if (dialog != null) {
-                dialog.showForClickedFeature(nearest.feature, nearest.point, this);
-            } else {
-                // Dialog not registered (no map frame yet) — fall back to a hint.
-                new Notification("<html><b>Maprizon:</b> " + nearest.feature.getFacing()
-                        + "<br><i>double-click to open in Maprizon</i></html>")
-                        .setDuration(Notification.TIME_SHORT).show();
-            }
+            // Dialog not registered (no map frame yet) — fall back to a hint.
+            new Notification("<html><b>Maprizon:</b> " + nearest.feature.getFacing()
+                    + "<br><i>right-click the layer &rarr; View in Maprizon to open in a browser</i></html>")
+                    .setDuration(Notification.TIME_SHORT).show();
         }
     }
 
