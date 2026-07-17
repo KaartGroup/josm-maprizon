@@ -3,8 +3,11 @@
 
     <!-- enter the SVN commit message -->
     <property name="commit.message" value="JOSM plugin for Maprizon street-level imagery coverage"/>
-    <!-- enter the *lowest* JOSM version this plugin is currently compatible with -->
-    <property name="plugin.main.version" value="18000"/>
+    <!-- the *lowest* JOSM version this plugin is compatible with / tested against -->
+    <property name="plugin.main.version" value="19481"/>
+    <!-- Plugin version: shown in the plugin manager and used by JOSM's external
+         update check. BUMP THIS ON EVERY RELEASE (semantic versioning). -->
+    <property name="plugin.version" value="1.0.0"/>
 
     <!-- Configure these properties (replace "..." accordingly).
          See https://josm.openstreetmap.de/wiki/DevelopersGuide/DevelopingPlugins
@@ -14,7 +17,7 @@
     <property name="plugin.class" value="org.openstreetmap.josm.plugins.maprizon.MaprizonPlugin"/>
     <property name="plugin.description" value="Shows Maprizon street-level imagery coverage in JOSM, with one-click open-in-browser"/>
     <property name="plugin.icon" value="images/maprizon.png"/>
-    <property name="plugin.link" value=""/>
+    <property name="plugin.link" value="https://github.com/KaartGroup/josm-maprizon"/>
     <!-- No plugin.requires: unlike CR_PLUGIN, this plugin has no dependency on another JOSM plugin. -->
 
     <!-- ** include targets that all plugins have in common ** -->
@@ -49,7 +52,7 @@
     <target name="compile" depends="init">
         <echo message="compiling sources for ${plugin.jar} ..."/>
         <javac srcdir="src" debug="true" destdir="${plugin.build.dir}" includeantruntime="false"
-               encoding="UTF-8" source="1.8" target="1.8">
+               encoding="UTF-8" source="17" target="17">
             <classpath refid="classpath"/>
             <compilerarg value="-Xlint:deprecation"/>
             <compilerarg value="-Xlint:unchecked"/>
@@ -80,7 +83,8 @@
                 <attribute name="Plugin-Icon" value="${plugin.icon}"/>
                 <attribute name="Plugin-Link" value="${plugin.link}"/>
                 <attribute name="Plugin-Mainversion" value="${plugin.main.version}"/>
-                <attribute name="Plugin-Version" value="${version.entry.commit.revision}"/>
+                <attribute name="Plugin-Minimum-Java-Version" value="17"/>
+                <attribute name="Plugin-Version" value="${plugin.version}"/>
             </manifest>
         </jar>
     </target>
