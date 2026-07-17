@@ -1,6 +1,9 @@
+// Maprizon JOSM plugin — Copyright (C) 2026 Kaart Group
+// SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.gui;
 
 import org.openstreetmap.josm.gui.dialogs.ToggleDialog;
+import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
 import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient;
 import org.openstreetmap.josm.plugins.maprizon.layer.MaprizonLayer;
@@ -49,6 +52,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth}), each image
  * is resolved through the viewer's signing endpoint so private imagery loads too.
  *
+ * <p>360 (equirectangular) frames are shown in an interactive {@link PanoramaPanel}
+ * (drag to look, scroll to zoom); everything else uses the flat {@link ImagePanel}.
+ *
  * <p>A single instance is registered per map frame; {@link #getInstance()} lets
  * the coverage layer's click handler drive it.
  */
@@ -58,6 +64,12 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
     /** Small LRU of decoded frames so walking back and forth is instant. */
     private static final int CACHE_MAX = 40;
+
+    /** Max width a cached panorama is decoded to — memory-vs-detail knob (source
+     * equirectangular 360 frames can be very large; 40 uncapped ones would blow the
+     * heap). Panoramas wider than this are downscaled on load. */
+    private static final int MAX_PANO_WIDTH = 4096;
+
     private final Map<String, BufferedImage> cache = new LinkedHashMap<String, BufferedImage>(64, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, BufferedImage> eldest) {
@@ -66,12 +78,18 @@ public final class MaprizonImageDialog extends ToggleDialog {
     };
 
     private final ImagePanel imagePanel = new ImagePanel();
+    private final PanoramaPanel panoPanel = new PanoramaPanel();
+    /** Holds whichever viewer is active for the current frame (flat or panorama). */
+    private final JPanel viewerHost = new JPanel(new BorderLayout());
     private final JLabel status = new JLabel(" ", SwingConstants.CENTER);
     private final JButton prevButton = new JButton("← Prev");
     private final JButton nextButton = new JButton("Next →");
 
-    /** Background loads. Single thread → newest request wins visually via loadToken. */
-    private final ExecutorService exec = Executors.newSingleThreadExecutor(r -> {
+    /** Background loads. A small pool (not a single thread) so one slow request
+     * can't serialize/wedge every later click; newest request still wins visually
+     * via loadToken. Combined with HTTP timeouts in ViewerApiClient/fetch, a hung
+     * backend can no longer leave the dialog stuck on "Loading…". */
+    private final ExecutorService exec = Executors.newFixedThreadPool(3, r -> {
         Thread t = new Thread(r, "maprizon-image-loader");
         t.setDaemon(true);
         return t;
@@ -101,7 +119,8 @@ public final class MaprizonImageDialog extends ToggleDialog {
         JPanel root = new JPanel(new BorderLayout());
         status.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
         root.add(status, BorderLayout.NORTH);
-        root.add(imagePanel, BorderLayout.CENTER);
+        viewerHost.add(imagePanel, BorderLayout.CENTER);
+        root.add(viewerHost, BorderLayout.CENTER);
 
         JPanel nav = new JPanel(new BorderLayout());
         nav.add(prevButton, BorderLayout.WEST);
@@ -164,27 +183,32 @@ public final class MaprizonImageDialog extends ToggleDialog {
         this.originatingLayer = layer;
         final long token = loadToken.incrementAndGet();
         exec.submit(() -> {
-            ViewerApiClient.SequenceResult result = ViewerApiClient.fetchSequence(clicked);
-            final List<ImageryFeature> seq;
-            final int start;
-            if (result != null) {
-                seq = result.frames;
-                // Open at the frame nearest the click so the image + on-map
-                // marker land where the user clicked (tile line features carry
-                // no per-frame index, so the API's clicked_index defaults to 0).
-                start = clickLonLat != null ? nearestIndex(seq, clickLonLat) : result.clickedIndex;
-            } else {
-                seq = Collections.singletonList(clicked);
-                start = 0;
-            }
-            SwingUtilities.invokeLater(() -> {
-                if (token != loadToken.get()) {
-                    return; // a newer click superseded this one
+            try {
+                ViewerApiClient.SequenceResult result = ViewerApiClient.fetchSequence(clicked);
+                final List<ImageryFeature> seq;
+                final int start;
+                if (result != null) {
+                    seq = result.frames;
+                    // Open at the frame nearest the click so the image + on-map
+                    // marker land where the user clicked (tile line features carry
+                    // no per-frame index, so the API's clicked_index defaults to 0).
+                    start = clickLonLat != null ? nearestIndex(seq, clickLonLat) : result.clickedIndex;
+                } else {
+                    seq = Collections.singletonList(clicked);
+                    start = 0;
                 }
-                frames = seq;
-                index = start;
-                display();
-            });
+                SwingUtilities.invokeLater(() -> {
+                    if (token != loadToken.get()) {
+                        return; // a newer click superseded this one
+                    }
+                    frames = seq;
+                    index = start;
+                    display();
+                });
+            } catch (Throwable t) {
+                Logging.warn("Maprizon: sequence load failed: " + t);
+                SwingUtilities.invokeLater(() -> status.setText("<html>Error loading sequence</html>"));
+            }
         });
     }
 
@@ -207,6 +231,78 @@ public final class MaprizonImageDialog extends ToggleDialog {
         return best;
     }
 
+    /** Bearing (deg, clockwise from north) to orient the selected frame's view
+     * cone: the baked per-image heading if present, else derived_heading, else the
+     * GPS travel bearing between adjacent frames plus the camera's mount offset. */
+    private static Double coneBearing(List<ImageryFeature> seq, int idx) {
+        ImageryFeature f = seq.get(idx);
+        Double h = parseDeg(f.getHeading());
+        if (h != null) {
+            return h;
+        }
+        h = parseDeg(f.getDerivedHeading());
+        if (h != null) {
+            return h;
+        }
+        Double travel = travelBearing(seq, idx);
+        return travel == null ? null : norm360(travel + facingMountOffset(f.getFacing()));
+    }
+
+    private static Double parseDeg(String s) {
+        if (s == null) {
+            return null;
+        }
+        try {
+            double d = Double.parseDouble(s.trim());
+            return Double.isNaN(d) ? null : norm360(d);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Initial great-circle bearing along travel, from the neighbouring frame (next
+     * if available, else previous). Null if there is no usable neighbour. */
+    private static Double travelBearing(List<ImageryFeature> seq, int idx) {
+        int a = idx;
+        int b = idx + 1;
+        if (b >= seq.size()) {
+            a = idx - 1;
+            b = idx;
+        }
+        if (a < 0 || b >= seq.size() || a == b) {
+            return null;
+        }
+        List<double[]> pa = seq.get(a).getPoints();
+        List<double[]> pb = seq.get(b).getPoints();
+        if (pa.isEmpty() || pb.isEmpty()) {
+            return null;
+        }
+        double lat1 = Math.toRadians(pa.get(0)[1]);
+        double lat2 = Math.toRadians(pb.get(0)[1]);
+        double dLon = Math.toRadians(pb.get(0)[0] - pa.get(0)[0]);
+        double y = Math.sin(dLon) * Math.cos(lat2);
+        double x = Math.cos(lat1) * Math.sin(lat2)
+                - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+        return norm360(Math.toDegrees(Math.atan2(y, x)));
+    }
+
+    /** Camera mount angle relative to travel — ONLY used for the derived fallback;
+     * the baked heading already encodes this. */
+    private static double facingMountOffset(String facing) {
+        if (FacingStyle.LEFT.equals(facing)) {
+            return -90;
+        }
+        if (FacingStyle.RIGHT.equals(facing)) {
+            return 90;
+        }
+        return 0; // front / still / 360
+    }
+
+    private static double norm360(double deg) {
+        double d = deg % 360.0;
+        return d < 0 ? d + 360.0 : d;
+    }
+
     private void step(int delta) {
         if (frames.isEmpty()) {
             return;
@@ -220,6 +316,15 @@ public final class MaprizonImageDialog extends ToggleDialog {
     }
 
     private void display() {
+        try {
+            displayImpl();
+        } catch (Throwable t) {
+            Logging.warn("Maprizon: display failed: " + t);
+            status.setText("<html>Error displaying image</html>");
+        }
+    }
+
+    private void displayImpl() {
         if (frames.isEmpty()) {
             status.setText("No image selected");
             imagePanel.setImage(null);
@@ -228,9 +333,11 @@ public final class MaprizonImageDialog extends ToggleDialog {
             return;
         }
         ImageryFeature f = frames.get(index);
-        // Move the on-map selection marker to the frame now being shown.
+        boolean is360 = FacingStyle.FACING_360.equals(f.getFacing());
+        // Move the on-map selection marker to the frame now being shown, and orient
+        // its view cone by the frame's heading (ring for 360).
         if (originatingLayer != null) {
-            originatingLayer.highlightFrame(f);
+            originatingLayer.highlightFrame(f, coneBearing(frames, index), is360);
         }
         StringBuilder sb = new StringBuilder("<html>");
         sb.append(f.getFacing()).append("  ·  ").append(index + 1).append(" / ").append(frames.size());
@@ -241,12 +348,12 @@ public final class MaprizonImageDialog extends ToggleDialog {
         status.setText(sb.toString());
         prevButton.setEnabled(index > 0);
         nextButton.setEnabled(index < frames.size() - 1);
-        loadImage(f.getImg());
+        loadImage(f.getImg(), is360);
     }
 
-    private void loadImage(String url) {
+    private void loadImage(String url, boolean is360) {
         if (url == null) {
-            imagePanel.setImage(null);
+            showLoaded(null, is360);
             return;
         }
         BufferedImage cached;
@@ -254,39 +361,109 @@ public final class MaprizonImageDialog extends ToggleDialog {
             cached = cache.get(url);
         }
         if (cached != null) {
-            imagePanel.setImage(cached);
+            showLoaded(cached, is360);
             return;
         }
         final long token = loadToken.incrementAndGet();
         exec.submit(() -> {
-            // Resolve the raw (stored) URL to fetchable bytes: signed when logged
-            // in (private + public), raw otherwise. Cache stays keyed by the raw
-            // URL so it survives signed-URL expiry.
-            String fetchUrl = ViewerApiClient.resolveImageUrl(url);
-            BufferedImage img = fetch(fetchUrl);
-            if (img != null) {
-                synchronized (cache) {
-                    cache.put(url, img);
+            try {
+                // Resolve the raw (stored) URL to fetchable bytes: signed when logged
+                // in (private + public), raw otherwise. Cache stays keyed by the raw
+                // URL so it survives signed-URL expiry.
+                String fetchUrl = ViewerApiClient.resolveImageUrl(url);
+                BufferedImage img = fetch(fetchUrl);
+                if (img != null && is360) {
+                    img = capPano(img); // bound cache memory for big equirectangular frames
                 }
-            }
-            final boolean loggedIn = ViewerAuth.getInstance().isLoggedIn();
-            SwingUtilities.invokeLater(() -> {
-                if (token == loadToken.get()) {
-                    imagePanel.setImage(img);
-                    if (img == null) {
-                        status.setText(loggedIn
-                                ? "<html>Image unavailable</html>"
-                                : "<html>Image unavailable"
-                                + "<br><span style='font-size:90%'>(may be private — log in to Viewer to view)</span></html>");
+                if (img != null) {
+                    synchronized (cache) {
+                        cache.put(url, img);
                     }
                 }
-            });
+                final BufferedImage fimg = img;
+                final boolean loggedIn = ViewerAuth.getInstance().isLoggedIn();
+                SwingUtilities.invokeLater(() -> {
+                    if (token != loadToken.get()) {
+                        return;
+                    }
+                    try {
+                        showLoaded(fimg, is360);
+                        if (fimg == null) {
+                            status.setText(loggedIn
+                                    ? "<html>Image unavailable</html>"
+                                    : "<html>Image unavailable"
+                                    + "<br><span style='font-size:90%'>(may be private — log in to Viewer to view)</span></html>");
+                        }
+                    } catch (Throwable t) {
+                        Logging.warn("Maprizon: show image failed: " + t);
+                        status.setText("<html>Error showing image</html>");
+                    }
+                });
+            } catch (Throwable t) {
+                Logging.warn("Maprizon: image load failed: " + t);
+                SwingUtilities.invokeLater(() -> status.setText("<html>Error loading image</html>"));
+            }
         });
+    }
+
+    /** Route a decoded frame to the right viewer: the panorama panel for a real
+     * equirectangular 360, else the flat image panel. EDT. */
+    private void showLoaded(BufferedImage img, boolean is360) {
+        if (is360 && img != null && isEquirect(img)) {
+            // Base compass bearing of the panorama's centre column; the live on-map
+            // wedge points at base + current look-yaw (mirrors the viewer's cone).
+            Double baseObj = frames.isEmpty() ? null : coneBearing(frames, index);
+            final double base = baseObj == null ? 0.0 : baseObj;
+            panoPanel.setPanorama(img);
+            panoPanel.setYawListener(yawDeg -> {
+                if (originatingLayer != null) {
+                    originatingLayer.setViewConeBearing(norm360(base + yawDeg));
+                }
+            });
+            setHost(panoPanel);
+        } else {
+            imagePanel.setImage(img);
+            setHost(imagePanel);
+        }
+    }
+
+    private void setHost(JComponent panel) {
+        if (viewerHost.getComponentCount() == 1 && viewerHost.getComponent(0) == panel) {
+            return;
+        }
+        viewerHost.removeAll();
+        viewerHost.add(panel, BorderLayout.CENTER);
+        viewerHost.revalidate();
+        viewerHost.repaint();
+    }
+
+    private static boolean isEquirect(BufferedImage img) {
+        double ar = (double) img.getWidth() / Math.max(1, img.getHeight());
+        return ar >= 1.9 && ar <= 2.1;
+    }
+
+    /** Downscale a panorama wider than {@link #MAX_PANO_WIDTH} (aspect-preserving,
+     * bilinear) so the frame cache can't exhaust the heap. */
+    private static BufferedImage capPano(BufferedImage src) {
+        if (src.getWidth() <= MAX_PANO_WIDTH) {
+            return src;
+        }
+        int w = MAX_PANO_WIDTH;
+        int h = (int) Math.round((double) src.getHeight() * MAX_PANO_WIDTH / src.getWidth());
+        BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = dst.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.drawImage(src, 0, 0, w, h, null);
+        g.dispose();
+        return dst;
     }
 
     private static BufferedImage fetch(String url) {
         try {
-            HttpClient.Response res = HttpClient.create(new URL(url)).connect();
+            HttpClient.Response res = HttpClient.create(new URL(url))
+                    .setConnectTimeout(10_000)
+                    .setReadTimeout(30_000)
+                    .connect();
             if (res.getResponseCode() != 200) {
                 Logging.warn("Maprizon: image fetch HTTP " + res.getResponseCode() + " for " + url);
                 return null;

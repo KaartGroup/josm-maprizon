@@ -1,3 +1,5 @@
+// Maprizon JOSM plugin — Copyright (C) 2026 Kaart Group
+// SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.pmtiles;
 
 import ch.poole.geo.pmtiles.Constants;
@@ -14,6 +16,7 @@ import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
+import org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth;
 import org.openstreetmap.josm.tools.Logging;
 
 import java.io.ByteArrayInputStream;
@@ -46,22 +49,44 @@ import java.util.zip.GZIPInputStream;
  */
 public final class PmtilesTileLoader implements AutoCloseable {
 
+    /** Keyed by {@code scope/facing} (not just facing) so the public and an org's
+     * private bake are separate readers — logging in/out re-points the tile source
+     * to a different, correct reader without any stale-cache surgery. */
     private final Map<String, Reader> readersByFacing = new ConcurrentHashMap<>();
 
+    /**
+     * Tileset scope for the current auth state: the logged-in user's Auth0 org id
+     * (its private bake {@code {org_id}-{facing}.pmtiles}) when available, else the
+     * public bake. Mirrors the viewer's {@code useMapTileUrls}. Anonymous is always
+     * the safe fallback, so a missing org id can never break the public path.
+     */
+    private static String currentScope() {
+        ViewerAuth auth = ViewerAuth.getInstance();
+        if (auth.isLoggedIn()) {
+            String org = auth.orgId();
+            if (org != null && !org.isEmpty()) {
+                return org;
+            }
+        }
+        return FacingStyle.PUBLIC_SCOPE;
+    }
+
     private Reader readerFor(String facing) throws IOException {
-        Reader existing = readersByFacing.get(facing);
+        String scope = currentScope();
+        String key = scope + "/" + facing;
+        Reader existing = readersByFacing.get(key);
         if (existing != null) {
             return existing;
         }
         synchronized (this) {
-            existing = readersByFacing.get(facing);
+            existing = readersByFacing.get(key);
             if (existing != null) {
                 return existing;
             }
-            URL url = new URL(FacingStyle.pmtilesUrlFor(facing));
+            URL url = new URL(FacingStyle.pmtilesUrlFor(facing, scope));
             FileChannel channel = new HttpUrlConnectionChannel(url);
             Reader reader = new Reader(channel);
-            readersByFacing.put(facing, reader);
+            readersByFacing.put(key, reader);
             return reader;
         }
     }
@@ -147,7 +172,10 @@ public final class PmtilesTileLoader implements AutoCloseable {
                     if (points.isEmpty()) {
                         continue;
                     }
-                    features.add(new ImageryFeature(points, props, facing));
+                    // Stamp the actual decoded zoom (this is the overzoom-resolved
+                    // ancestor level when called from loadWithOverzoom), so the layer
+                    // can suppress coarse geometry once its fine replacement loads.
+                    features.add(new ImageryFeature(points, props, facing, z));
                 }
             }
         }

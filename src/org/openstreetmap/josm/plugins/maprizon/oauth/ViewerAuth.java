@@ -1,3 +1,5 @@
+// Maprizon JOSM plugin — Copyright (C) 2026 Kaart Group
+// SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.oauth;
 
 import jakarta.json.Json;
@@ -74,6 +76,7 @@ public final class ViewerAuth {
     private static final String PREF_REFRESH = "maprizon.auth0.refreshToken";
     private static final String PREF_EXPIRES_AT = "maprizon.auth0.expiresAt"; // epoch seconds
     private static final String PREF_EMAIL = "maprizon.auth0.email";
+    private static final String PREF_ORG_ID = "maprizon.auth0.orgId"; // Auth0 org (org_xxx)
 
     /** Refresh the access token this many seconds before it actually expires. */
     private static final long REFRESH_SKEW_SECONDS = 120;
@@ -138,12 +141,33 @@ public final class ViewerAuth {
         return Config.getPref().get(PREF_EMAIL, "");
     }
 
+    /**
+     * The logged-in user's Auth0 organization id (e.g. {@code org_9alzx7S32reIQ86s}),
+     * used to fetch the org's private per-facing PMTiles bake ({@code {org_id}-{facing}.pmtiles})
+     * exactly as the viewer's {@code useMapTileUrls} does. Empty when unknown /
+     * logged out. Back-fills from the stored access token's claims on first use, so
+     * it also works for sessions that logged in before this feature existed.
+     */
+    public String orgId() {
+        String cached = Config.getPref().get(PREF_ORG_ID, "");
+        if (!cached.isEmpty()) {
+            return cached;
+        }
+        String org = orgIdFromJwt(Config.getPref().get(PREF_ACCESS, ""));
+        if (org != null && !org.isEmpty()) {
+            Config.getPref().put(PREF_ORG_ID, org);
+            return org;
+        }
+        return "";
+    }
+
     /** Forget all credentials. Fires a state-change so callers can refresh UI/imagery. */
     public void logout() {
         Config.getPref().put(PREF_ACCESS, "");
         Config.getPref().put(PREF_REFRESH, "");
         Config.getPref().put(PREF_EXPIRES_AT, null);
         Config.getPref().put(PREF_EMAIL, "");
+        Config.getPref().put(PREF_ORG_ID, "");
         fireChanged();
     }
 
@@ -260,6 +284,44 @@ public final class ViewerAuth {
         }
         long expiresAt = System.currentTimeMillis() / 1000L + tr.expiresIn;
         Config.getPref().putLong(PREF_EXPIRES_AT, expiresAt);
+        // Refresh the org id from the new token's claims (authoritative; handles a
+        // user who switched orgs). Only overwrite when the claim is present.
+        String org = orgIdFromJwt(tr.accessToken);
+        if (org != null && !org.isEmpty()) {
+            Config.getPref().put(PREF_ORG_ID, org);
+        }
+    }
+
+    /**
+     * Read a claim from a JWT payload WITHOUT verifying the signature — we only read
+     * claims from our own already-obtained token to derive the org id (Auth0
+     * {@code org_id}, or the {@code mikro/org_id} custom claim as a fallback). The
+     * token was issued to us over TLS by Auth0; this is not a security decision.
+     * Returns null if the token is absent/unparseable or carries no org claim.
+     */
+    private static String orgIdFromJwt(String jwt) {
+        if (jwt == null || jwt.isEmpty()) {
+            return null;
+        }
+        String[] parts = jwt.split("\\.");
+        if (parts.length < 2) {
+            return null;
+        }
+        try {
+            byte[] payload = Base64.getUrlDecoder().decode(parts[1]);
+            JsonObject claims = parse(new String(payload, StandardCharsets.UTF_8));
+            if (claims == null) {
+                return null;
+            }
+            String org = claims.getString("org_id", "");
+            if (org.isEmpty()) {
+                org = claims.getString("mikro/org_id", "");
+            }
+            return org.isEmpty() ? null : org;
+        } catch (RuntimeException e) {
+            Logging.warn("Maprizon: could not read org_id from token: " + e);
+            return null;
+        }
     }
 
     private void fetchAndStoreEmail(String accessToken) {

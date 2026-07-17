@@ -1,3 +1,5 @@
+// Maprizon JOSM plugin — Copyright (C) 2026 Kaart Group
+// SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.io;
 
 import jakarta.json.Json;
@@ -41,6 +43,11 @@ public final class ViewerApiClient {
 
     /** Production viewer backend base — mirrors {@code client/src/config.js} API_ENDPOINT. */
     private static final String API_BASE = "https://viewer.kaart.com/backend/api/";
+
+    /** HTTP timeouts so a slow/unresponsive backend can never hang the loader
+     * thread indefinitely (which wedged the whole image dialog on "Loading…"). */
+    private static final int CONNECT_TIMEOUT_MS = 10_000;
+    private static final int READ_TIMEOUT_MS = 20_000;
 
     /** The ordered frames of a sequence plus the index of the clicked frame. */
     public static final class SequenceResult {
@@ -102,6 +109,8 @@ public final class ViewerApiClient {
                     .create(new URL(API_BASE + endpoint), "POST")
                     .setHeader("Content-Type", "application/json")
                     .setHeader("Accept", "application/json")
+                    .setConnectTimeout(CONNECT_TIMEOUT_MS)
+                    .setReadTimeout(READ_TIMEOUT_MS)
                     .setRequestBody(payload);
             if (token != null) {
                 client.setHeader("Authorization", "Bearer " + token);
@@ -169,6 +178,8 @@ public final class ViewerApiClient {
                     .setHeader("Authorization", "Bearer " + token)
                     .setHeader("Content-Type", "application/json")
                     .setHeader("Accept", "application/json")
+                    .setConnectTimeout(CONNECT_TIMEOUT_MS)
+                    .setReadTimeout(READ_TIMEOUT_MS)
                     .setRequestBody(payload)
                     .connect();
             if (res.getResponseCode() != 200) {

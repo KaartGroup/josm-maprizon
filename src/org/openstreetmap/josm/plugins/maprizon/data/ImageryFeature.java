@@ -1,3 +1,5 @@
+// Maprizon JOSM plugin — Copyright (C) 2026 Kaart Group
+// SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.data;
 
 import java.util.Collections;
@@ -12,12 +14,30 @@ import java.util.Map;
  */
 public final class ImageryFeature {
 
+    /**
+     * Sentinel {@link #getSourceZoom()} for features that did NOT come from a
+     * coverage tile (e.g. the image-dialog frames decoded from a viewer API
+     * response). Treated as "always fine" so any such feature that were ever
+     * painted survives the detail-mode zoom filter in the layer.
+     */
+    public static final int NATIVE_ZOOM = Integer.MAX_VALUE;
+
     /** Ordered {lon, lat} vertex list; size 1 for a point feature. */
     private final List<double[]> points;
     private final Map<String, Object> properties;
     private final String facing;
+    /** Slippy zoom of the tile this feature was actually decoded from (the
+     * overzoom-resolved ancestor level, e.g. 15 for native fine, 12/13 for a
+     * coarse overzoom). Drives the layer's level-of-detail paint filter so coarse
+     * geometry and its full-resolution replacement never render on top of each
+     * other. {@link #NATIVE_ZOOM} for non-tile features. */
+    private final int sourceZoom;
 
     public ImageryFeature(List<double[]> points, Map<String, Object> properties, String facing) {
+        this(points, properties, facing, NATIVE_ZOOM);
+    }
+
+    public ImageryFeature(List<double[]> points, Map<String, Object> properties, String facing, int sourceZoom) {
         this.points = Collections.unmodifiableList(points);
         this.properties = properties == null ? Collections.emptyMap() : properties;
         // Single chokepoint: every facing is normalized to lowercase here, so all
@@ -26,6 +46,7 @@ public final class ImageryFeature {
         // decode vs viewer API response) cased it. Tile decode already passes
         // lowercase; this guards the API-parsed path.
         this.facing = facing == null ? null : facing.toLowerCase(Locale.ROOT);
+        this.sourceZoom = sourceZoom;
     }
 
     public List<double[]> getPoints() {
@@ -35,6 +56,12 @@ public final class ImageryFeature {
     /** The facing this feature was loaded from (i.e. which per-facing PMTiles file). */
     public String getFacing() {
         return facing;
+    }
+
+    /** Slippy zoom of the tile this feature was decoded from; {@link #NATIVE_ZOOM}
+     * for non-tile (API) features. See the field doc. */
+    public int getSourceZoom() {
+        return sourceZoom;
     }
 
     public String getSequenceId() {
@@ -55,6 +82,12 @@ public final class ImageryFeature {
 
     public String getHeading() {
         return prop("heading");
+    }
+
+    /** GPS/geometry-derived heading fallback the backend emits alongside
+     * {@link #getHeading()} when the primary heading is absent. */
+    public String getDerivedHeading() {
+        return prop("derived_heading");
     }
 
     public String getTimestamp() {

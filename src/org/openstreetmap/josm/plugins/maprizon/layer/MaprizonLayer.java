@@ -1,3 +1,5 @@
+// Maprizon JOSM plugin — Copyright (C) 2026 Kaart Group
+// SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.layer;
 
 import org.openstreetmap.josm.data.Bounds;
@@ -26,13 +28,17 @@ import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import java.awt.BasicStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Desktop;
 import java.awt.Graphics2D;
 import java.awt.Point;
 import java.awt.RenderingHints;
+import java.awt.geom.Path2D;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
@@ -104,6 +110,34 @@ public class MaprizonLayer extends Layer implements MouseListener {
      */
     private static final int MAX_OVERZOOM_STEPS = 6;
 
+    /**
+     * Fraction of the max per-level clipped feature count that a level must reach
+     * to be considered "fully populated" and thus eligible to win. Used by
+     * {@link #loadWithOverzoom} to prefer the FINEST such level (crisp geometry)
+     * over a coarser ancestor that carries only marginally more features. Set high
+     * (favor fine geometry) because in practice the finest requested zoom is fully
+     * baked; the guard only defends the pathological near-empty-fine-tile case.
+     * Tunable.
+     */
+    private static final double FINE_ENOUGH_FRACTION = 0.6;
+
+    /**
+     * Display slippy zoom at/above which the layer is in "detail" mode: every
+     * enabled facing renders, but ONLY at its finest fetched resolution, and
+     * auto-download is allowed. Below it ("overview", zoomed out) a single facing
+     * renders and auto-download is suppressed. Chosen as roughly the zoom where
+     * individual image points separate on screen. Tunable.
+     */
+    private static final int USABLE_ZOOM = 16;
+
+    /** The one facing shown in overview (zoomed-out) mode — 360 is the most
+     * representative of overall coverage. */
+    private static final String OVERVIEW_FACING = FacingStyle.FACING_360;
+
+    /** Debounce (ms) after the view settles before an auto-download fires; further
+     * movement within the window resets it (mirrors JOSM's ContinuousDownload). */
+    private static final int AUTO_DEBOUNCE_MS = 400;
+
     private final PmtilesTileLoader loader = new PmtilesTileLoader();
     private final ExecutorService loadExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "maprizon-tile-loader");
@@ -136,13 +170,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "b9-audit-fixes";
-
-    /** Diagnostic log file (easily reachable): ~/maprizon-diag.log. Truncated at
-     * the start of each explicit download, so `cat ~/maprizon-diag.log` always
-     * shows exactly the last run's full fetch/merge/paint trace. */
-    private static final java.io.File DIAG_FILE =
-            new java.io.File(System.getProperty("user.home"), "maprizon-diag.log");
+    private static final String BUILD_TAG = "b29-strip-diagnostics";
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -163,11 +191,35 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Opt-in live behavior: re-download around the view as it changes. Off by default. */
     private volatile boolean autoRefresh = false;
     private volatile Bounds lastAutoBounds;
-    private volatile int lastAutoZoom = -1;
+    /** Longitude span of the last auto-load view, used to tell a PAN (extent
+     * unchanged, centre moved) from a ZOOM (extent changed). Rounded integer zoom
+     * levels were too coarse — a small wheel-zoom keeps the same rounded zoom yet
+     * recentres toward the cursor, which read as a pan and triggered a needless
+     * download. -1 = none yet. */
+    private volatile double lastAutoLonSpan = -1;
+
+    /** Finest tile zoom among all stored features (-1 = none yet). In detail mode
+     * the paint filter shows only features at this zoom, hiding coarse overzoom
+     * leftovers. EDT-updated in {@link #merge}; volatile so paint reads it safely. */
+    private volatile int maxStoredSourceZoom = -1;
+
+    // Debounced auto-download (opt-in live mode). All EDT.
+    private Timer autoDebounceTimer;
+    private Bounds pendingAutoBounds;
+    private int pendingAutoWidth;
+
+    // Loading-spinner animation. All EDT.
+    private Timer busyTicker;
+    private int spinnerTick;
 
     private LatLon lastClickLatLon;
     private ImageryFeature lastNearestFeature;
     private double[] lastNearestPoint;
+    /** Camera bearing (deg, clockwise from north) orienting the selected frame's
+     * view cone; null = unknown (no wedge). {@link #cone360} true = draw a ring
+     * (panoramic) instead of a wedge. Set via {@link #highlightFrame}. */
+    private Double coneBearingDeg;
+    private boolean cone360;
 
     // --- rendering constants (Phase 1 styling: coverage was hairline-thin +
     // tiny dots, invisible except at max zoom; these make it legible). ---
@@ -188,10 +240,21 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Max screen-space distance (px) from a click to a feature for it to count
      * as selected — zoom-independent, so a click in empty space selects nothing. */
     private static final double SELECT_PIXEL_THRESHOLD = 18.0;
+    /** View-cone field-of-view spread (degrees) for the selected image's camera
+     * wedge, and its on-screen radius (px). Mirrors the viewer's cone (which bakes
+     * the angle into a sprite); here it is drawn vectorially. Tunable. */
+    private static final double CONE_FOV_DEG = 60.0;
+    private static final int CONE_RADIUS_PX = 40;
+
+    /** Login/logout flips the tile scope (public bake vs the org's private bake),
+     * so accumulated coverage + the tile ledger are stale — drop them so the next
+     * download pulls from the correct bake. */
+    private final Runnable authListener = () -> SwingUtilities.invokeLater(this::clearCoverage);
 
     public MaprizonLayer() {
         super("Maprizon Coverage");
         enabledFacings.addAll(FacingStyle.ALL_FACINGS);
+        ViewerAuth.getInstance().addLoginStateListener(authListener);
     }
 
     @Override
@@ -210,6 +273,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
         if (map != null && map.mapView != null) {
             map.mapView.removeMouseListener(this);
         }
+        ViewerAuth.getInstance().removeLoginStateListener(authListener);
+        if (autoDebounceTimer != null) {
+            autoDebounceTimer.stop();
+        }
+        if (busyTicker != null) {
+            busyTicker.stop();
+        }
         loadExecutor.shutdownNow();
         loader.close();
         super.destroy();
@@ -219,11 +289,20 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     @Override
     public void paint(Graphics2D g, MapView mv, Bounds bbox) {
-        // Live mode only: opt-in re-download when the view has meaningfully moved
-        // or zoomed. Uses the SAME fetch path as an explicit download, just
-        // without the area-too-large prompt.
-        if (autoRefresh && !loading.get() && autoViewChanged(bbox, mv)) {
-            submitDownload(bbox, mv.getWidth(), false, false);
+        // Current display zoom decides level-of-detail: below USABLE_ZOOM we are in
+        // "overview" (zoomed out); at/above it in "detail" (zoomed in enough to see
+        // individual image points).
+        int rawZoom = rawScreenZoom(bbox, mv.getWidth());
+        boolean detailMode = rawZoom >= USABLE_ZOOM;
+        int maxSourceZoom = maxStoredSourceZoom;
+
+        // Live mode (opt-in): re-download when the view meaningfully moved/zoomed —
+        // but ONLY in detail mode (so a zoomed-out pan never triggers a coarse
+        // mass-load) and DEBOUNCED (a continuous pan fires one load when it settles,
+        // not a storm mid-drag). Same fetch path as an explicit download, minus the
+        // area-too-large prompt.
+        if (autoRefresh && detailMode && !loading.get() && autoViewChanged(bbox, mv)) {
+            scheduleAutoDownload(bbox, mv.getWidth());
         }
 
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -238,6 +317,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
             }
             float offsetPx = facingOffsetPx(entry.getKey());
             for (ImageryFeature feature : entry.getValue()) {
+                if (!lodVisible(feature, detailMode, maxSourceZoom)) {
+                    continue;
+                }
                 paintCasing(g, mv, feature, offsetPx);
             }
         }
@@ -248,6 +330,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
             Color color = FacingStyle.colorFor(entry.getKey());
             float offsetPx = facingOffsetPx(entry.getKey());
             for (ImageryFeature feature : entry.getValue()) {
+                if (!lodVisible(feature, detailMode, maxSourceZoom)) {
+                    continue;
+                }
                 paintColor(g, mv, feature, color, offsetPx);
             }
         }
@@ -256,6 +341,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
         if (lastNearestFeature != null && lastNearestPoint != null
                 && enabledFacings.contains(lastNearestFeature.getFacing())) {
             paintHighlight(g, mv);
+        }
+
+        // Loading feedback: animated spinner + label while a download runs (explicit
+        // or debounced auto). ensureBusyTicker drives the repaint that animates it,
+        // and stops itself when idle.
+        boolean busy = loading.get();
+        ensureBusyTicker(busy);
+        if (busy) {
+            paintSpinner(g);
         }
 
         // One-shot post-download snapshot: exactly what's on screen right now,
@@ -394,12 +488,24 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * image dialog as the user walks the sequence (prev/next), so the on-map
      * marker tracks the image currently shown. EDT only.
      */
-    public void highlightFrame(ImageryFeature frame) {
+    public void highlightFrame(ImageryFeature frame, Double bearingDeg, boolean is360) {
         if (frame == null || frame.getPoints().isEmpty()) {
             return;
         }
         lastNearestFeature = frame;
         lastNearestPoint = frame.getPoints().get(0);
+        coneBearingDeg = bearingDeg;
+        cone360 = is360;
+        invalidate();
+    }
+
+    /** Live-update the view cone's bearing (deg CW from north) for the selected
+     * 360 as the user looks around its panorama; no-op unless a 360 is selected. */
+    public void setViewConeBearing(double deg) {
+        if (!cone360) {
+            return;
+        }
+        coneBearingDeg = deg;
         invalidate();
     }
 
@@ -408,6 +514,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * selected (and thus what "View in Maprizon" / double-click will open). */
     private void paintHighlight(Graphics2D g, MapView mv) {
         Point p = mv.getPoint(new LatLon(lastNearestPoint[1], lastNearestPoint[0]));
+        // View cone first, so the selection ring/dot stay on top of it.
+        paintViewCone(g, p);
         int r = SELECTED_RADIUS;
         g.setStroke(new BasicStroke(2.5f));
         g.setColor(Color.WHITE);
@@ -415,6 +523,64 @@ public class MaprizonLayer extends Layer implements MouseListener {
         g.setColor(FacingStyle.colorFor(lastNearestFeature.getFacing()));
         g.drawOval(p.x - r, p.y - r, 2 * r, 2 * r);
         g.fillOval(p.x - POINT_RADIUS, p.y - POINT_RADIUS, 2 * POINT_RADIUS, 2 * POINT_RADIUS);
+    }
+
+    /**
+     * Draw the selected image's camera view cone: a facing-coloured translucent
+     * wedge centred on the frame's heading (or a full ring for 360), with a dark
+     * halo so it reads over any imagery — mirrors the viewer's cone. No-op when no
+     * frame with a known orientation is selected.
+     */
+    private void paintViewCone(Graphics2D g, Point p) {
+        if (lastNearestFeature == null) {
+            return;
+        }
+        Color base = FacingStyle.colorFor(lastNearestFeature.getFacing());
+        int r = CONE_RADIUS_PX;
+        if (cone360) {
+            // Omnidirectional ring for the 360...
+            g.setColor(new Color(base.getRed(), base.getGreen(), base.getBlue(), 70));
+            g.fillOval(p.x - r, p.y - r, 2 * r, 2 * r);
+            g.setColor(new Color(0, 0, 0, 120));
+            g.setStroke(new BasicStroke(3f));
+            g.drawOval(p.x - r, p.y - r, 2 * r, 2 * r);
+            g.setColor(base);
+            g.setStroke(new BasicStroke(1.5f));
+            g.drawOval(p.x - r, p.y - r, 2 * r, 2 * r);
+            // ...plus a wedge tracking where the user is currently looking inside the
+            // panorama (updated live via setViewConeBearing as they drag).
+            if (coneBearingDeg != null) {
+                paintWedge(g, p, base, r);
+            }
+            return;
+        }
+        if (coneBearingDeg != null) {
+            paintWedge(g, p, base, r);
+        }
+    }
+
+    /** Filled facing-coloured FOV wedge from {@code p}, centred on
+     * {@link #coneBearingDeg}, with a dark halo so it reads over imagery/the ring. */
+    private void paintWedge(Graphics2D g, Point p, Color base, int r) {
+        double br = Math.toRadians(coneBearingDeg);
+        double half = Math.toRadians(CONE_FOV_DEG / 2.0);
+        Path2D.Double path = new Path2D.Double();
+        path.moveTo(p.x, p.y);
+        int steps = 12;
+        for (int i = 0; i <= steps; i++) {
+            double a = br - half + (2 * half) * i / steps;
+            // Compass bearing: 0 deg = north (screen up = -y), increasing clockwise.
+            path.lineTo(p.x + r * Math.sin(a), p.y - r * Math.cos(a));
+        }
+        path.closePath();
+        g.setColor(new Color(base.getRed(), base.getGreen(), base.getBlue(), 150));
+        g.fill(path);
+        g.setColor(new Color(0, 0, 0, 120));
+        g.setStroke(new BasicStroke(3f));
+        g.draw(path);
+        g.setColor(base);
+        g.setStroke(new BasicStroke(1.5f));
+        g.draw(path);
     }
 
     // ------------------------------------------------------------- download
@@ -439,7 +605,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
         storedFeatureKeys.clear();
         featuresByFacing = new HashMap<>();
         lastAutoBounds = null;
-        lastAutoZoom = -1;
+        lastAutoLonSpan = -1;
+        maxStoredSourceZoom = -1;
+        if (autoDebounceTimer != null) {
+            autoDebounceTimer.stop();
+        }
         invalidate();
     }
 
@@ -458,10 +628,25 @@ public class MaprizonLayer extends Layer implements MouseListener {
             return;
         }
         final Bounds view = new Bounds(bbox);
+        // Kick one repaint so the loading spinner appears immediately: an explicit
+        // download over a static view produces no map movement to trigger paint(),
+        // so without this the spinner (and its self-sustaining animation ticker)
+        // wouldn't start until the download had already finished.
+        SwingUtilities.invokeLater(this::invalidate);
         loadExecutor.submit(() -> {
             try {
                 refreshZoomBounds(); // blocking header read, but on the loader thread
-                int zoom = cappedZoom(view, screenZoom(view, widthPx));
+                // Request at the screen-matched zoom clamped to the archive range.
+                // We deliberately do NOT drop this to "the deepest zoom with a tile
+                // at the view centre" (the old cappedZoom): that single-point probe
+                // collapsed the WHOLE view to a coarse zoom whenever the centre pixel
+                // sat in a small coverage gap, and since per-tile overzoom only walks
+                // UP (coarser), the fine geometry was then unreachable — the jagged
+                // tracks. Instead we request the fine zoom (header advertises 16; the
+                // finest tiles actually baked are z15) and let loadWithOverzoom fetch
+                // the native z15 tile per requested tile: full-resolution geometry,
+                // clipped losslessly by bbox, matching what the web viewer renders.
+                int zoom = screenZoom(view, widthPx);
                 diagReset("==== MAPRIZON DOWNLOAD " + BUILD_TAG + " ====");
                 diag(String.format(Locale.ROOT,
                         "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b enabled=%s",
@@ -601,6 +786,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 if (storedFeatureKeys.add(featureKey(e.getKey(), f))) {
                     combined.add(f);
                     added++;
+                    if (f.getSourceZoom() != ImageryFeature.NATIVE_ZOOM
+                            && f.getSourceZoom() > maxStoredSourceZoom) {
+                        maxStoredSourceZoom = f.getSourceZoom();
+                    }
                 }
             }
             next.put(e.getKey(), combined);
@@ -643,27 +832,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * a line spanning several requested tiles are collapsed later in
      * {@link #merge}.
      */
-    /** Truncate + start a fresh diagnostic log for one download run. */
+    /** Start-of-download trace marker. Goes to JOSM's debug log (off by default),
+     * not a file in the user's home dir. */
     private static void diagReset(String header) {
-        try {
-            java.nio.file.Files.write(DIAG_FILE.toPath(),
-                    (header + System.lineSeparator()).getBytes(StandardCharsets.UTF_8));
-        } catch (IOException ignored) {
-            // diagnostics are best-effort; never break a download over logging
-        }
-        Logging.info("MAPRIZON-DIAG " + header);
+        Logging.debug("MAPRIZON-DIAG " + header);
     }
 
-    /** Append one diagnostic line to ~/maprizon-diag.log AND the JOSM log. */
+    /** One download/paint trace line, to JOSM's debug log. */
     private static void diag(String msg) {
-        try {
-            java.nio.file.Files.write(DIAG_FILE.toPath(),
-                    (msg + System.lineSeparator()).getBytes(StandardCharsets.UTF_8),
-                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-        } catch (IOException ignored) {
-            // best-effort
-        }
-        Logging.info("MAPRIZON-DIAG " + msg);
+        Logging.debug("MAPRIZON-DIAG " + msg);
     }
 
     /** Feature count + total vertex count + the geographic bbox the features
@@ -696,8 +873,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
         int ax = tx;
         int ay = ty;
         int minZoom = archiveMinZoom();
-        List<ImageryFeature> best = Collections.emptyList();
-        int bestZoom = -1;
+        // Collect every present level's clip (finest -> coarsest order), then
+        // choose. We can't decide during the walk: the choice depends on the max
+        // clipped count across ALL levels (see selection rule below).
+        List<int[]> levelZoomHolder = new ArrayList<>();   // each: {az}
+        List<List<ImageryFeature>> levelClipped = new ArrayList<>();
         StringBuilder presence = new StringBuilder(); // per-level: zN=raw/clip or zN=.
         for (int step = 0; step <= MAX_OVERZOOM_STEPS && az >= minZoom; step++) {
             String ancestorKey = tileKey(facing, az, ax, ay);
@@ -712,12 +892,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 List<ImageryFeature> clipped = clipToTile(features, zoom, tx, ty);
                 presence.append(" z").append(az).append('=').append(features.size())
                         .append('/').append(clipped.size());
-                // Strictly-greater: on ties the DEEPER level (seen first) wins,
-                // favoring finer geometry.
-                if (clipped.size() > best.size()) {
-                    best = clipped;
-                    bestZoom = az;
-                }
+                levelZoomHolder.add(new int[]{az});
+                levelClipped.add(clipped);
             } else {
                 presence.append(" z").append(az).append("=.");
             }
@@ -725,6 +901,33 @@ public class MaprizonLayer extends Layer implements MouseListener {
             az -= 1;
             ax >>= 1;
             ay >>= 1;
+        }
+        // Selection rule: keep the FINEST (deepest) level that carries essentially
+        // all of the data — the deepest level whose clipped count is at least
+        // FINE_ENOUGH_FRACTION of the max clipped count across levels. Tippecanoe
+        // simplifies line geometry at coarse zooms, so a coarse ancestor's lines
+        // are decimated; serving them overzoomed produces the ragged zigzags we
+        // saw. A bare "most clipped features wins" rule would drag a facing down
+        // to a coarse level for a trivial one- or two-feature margin (observed:
+        // front z13=37 vs z10=38 clipped -> picked z10, jagged). The fraction keeps
+        // fine geometry in that common case while still falling back to a denser
+        // coarse parent if the fine tile is genuinely near-empty (the guarded
+        // case: fine z13=16 vs z12=3188 -> z12 still wins).
+        int maxClipped = 0;
+        for (List<ImageryFeature> c : levelClipped) {
+            maxClipped = Math.max(maxClipped, c.size());
+        }
+        double floor = FINE_ENOUGH_FRACTION * maxClipped;
+        List<ImageryFeature> best = Collections.emptyList();
+        int bestZoom = -1;
+        for (int i = 0; i < levelClipped.size(); i++) {
+            List<ImageryFeature> clipped = levelClipped.get(i);
+            // levelClipped is finest -> coarsest, so the first qualifier is finest.
+            if (!clipped.isEmpty() && clipped.size() >= floor) {
+                best = clipped;
+                bestZoom = levelZoomHolder.get(i)[0];
+                break;
+            }
         }
         // Per requested tile: which zoom levels had a tile (raw/clipped counts),
         // which level won, and how much survived the clip. Reveals coarse-facing
@@ -808,37 +1011,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
     /**
-     * The archive header advertises maxZoom=16 but tiles are baked shallower;
-     * requesting a zoom deeper than any tile exists forces every tile into
-     * overzoom + fine-tile clipping, which sheds most of a facing's data. Cap the
-     * requested zoom to the DEEPEST zoom that actually has a tile at the view
-     * centre for any enabled facing — measured, not assumed — so fetched tiles
-     * are native and clip losslessly. Never caps upward; if the centre is empty
-     * at every level it returns the input unchanged (no worse than before).
-     * Runs on the loader thread, where blocking range reads are fine.
-     */
-    private int cappedZoom(Bounds view, int zoom) {
-        double cLon = (view.getMinLon() + view.getMaxLon()) / 2.0;
-        double cLat = (view.getMinLat() + view.getMaxLat()) / 2.0;
-        for (int z = zoom; z >= archiveMinZoom(); z--) {
-            int[] t = TileMath.lonLatToTile(cLon, cLat, z);
-            for (String facing : FacingStyle.ALL_FACINGS) {
-                if (!enabledFacings.contains(facing)) {
-                    continue;
-                }
-                try {
-                    if (loader.loadTileOrNull(facing, z, t[0], t[1]) != null) {
-                        return z;
-                    }
-                } catch (IOException ignored) {
-                    // try the next facing / next zoom
-                }
-            }
-        }
-        return zoom;
-    }
-
-    /**
      * SSOT zoom selection: the slippy zoom whose tile resolution matches the
      * current on-screen resolution, clamped to the archive's [min,max]. This
      * replaces the old "~6 tiles across" heuristic + coarsen-to-minZoom loop that
@@ -847,10 +1019,100 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * matching zoom is z = log2(widthPx * 360 / (lonSpan * 256)).
      */
     private int screenZoom(Bounds view, int widthPx) {
+        return Math.max(archiveMinZoom(), Math.min(archiveMaxZoom(), rawScreenZoom(view, widthPx)));
+    }
+
+    /** The screen-matched slippy zoom BEFORE clamping to the archive range — the
+     * true on-screen zoom, used for the level-of-detail decision and the auto-load
+     * gate (both of which must reason about zoom levels deeper than the archive). */
+    private int rawScreenZoom(Bounds view, int widthPx) {
         double lonSpan = Math.max(1e-9, view.getMaxLon() - view.getMinLon());
         int px = Math.max(1, widthPx);
-        int z = (int) Math.round(Math.log(px * 360.0 / (lonSpan * 256.0)) / Math.log(2));
-        return Math.max(archiveMinZoom(), Math.min(archiveMaxZoom(), z));
+        return (int) Math.round(Math.log(px * 360.0 / (lonSpan * 256.0)) / Math.log(2));
+    }
+
+    /**
+     * Level-of-detail paint filter. Overview (zoomed out, {@code !detailMode}): only
+     * the single {@link #OVERVIEW_FACING} renders, to cut clutter. Detail (zoomed
+     * in): every enabled facing renders but ONLY at the finest fetched zoom
+     * ({@code maxSourceZoom}), so coarse overzoom geometry stops rendering beneath
+     * its full-resolution replacement. {@code maxSourceZoom < 0} means nothing has
+     * been stored yet (show whatever exists).
+     */
+    private boolean lodVisible(ImageryFeature f, boolean detailMode, int maxSourceZoom) {
+        if (!detailMode) {
+            return OVERVIEW_FACING.equals(f.getFacing());
+        }
+        return maxSourceZoom < 0 || f.getSourceZoom() >= maxSourceZoom;
+    }
+
+    /** (Re)start the debounce timer for an auto-download of the given view; a fresh
+     * view change within the window resets it, so a continuous pan fires exactly one
+     * load when it settles rather than a storm mid-drag. EDT. */
+    private void scheduleAutoDownload(Bounds bbox, int widthPx) {
+        pendingAutoBounds = new Bounds(bbox);
+        pendingAutoWidth = widthPx;
+        if (autoDebounceTimer == null) {
+            autoDebounceTimer = new Timer(AUTO_DEBOUNCE_MS, e -> fireAutoDownload());
+            autoDebounceTimer.setRepeats(false);
+        }
+        autoDebounceTimer.restart();
+    }
+
+    private void fireAutoDownload() {
+        Bounds b = pendingAutoBounds;
+        if (b == null || !autoRefresh || loading.get()) {
+            return;
+        }
+        // Re-check the gate at fire time: if the pan ended zoomed out of detail
+        // range, don't auto-load coarse data.
+        if (rawScreenZoom(b, pendingAutoWidth) < USABLE_ZOOM) {
+            return;
+        }
+        submitDownload(b, pendingAutoWidth, false, false);
+    }
+
+    /** Start/stop the repaint ticker that animates the loading spinner. EDT. */
+    private void ensureBusyTicker(boolean on) {
+        if (on) {
+            if (busyTicker == null) {
+                busyTicker = new Timer(120, e -> {
+                    spinnerTick++;
+                    invalidate();
+                });
+                busyTicker.setRepeats(true);
+            }
+            if (!busyTicker.isRunning()) {
+                busyTicker.start();
+            }
+        } else if (busyTicker != null && busyTicker.isRunning()) {
+            busyTicker.stop();
+        }
+    }
+
+    /** Small animated "loading" indicator drawn top-left while a download runs, so
+     * the layer's busy state is visible. Component (screen) coordinates. */
+    private void paintSpinner(Graphics2D g) {
+        String msg = "Loading Maprizon coverage…";
+        g.setFont(g.getFont().deriveFont(Font.BOLD, 12f));
+        FontMetrics fm = g.getFontMetrics();
+        int spin = 16;
+        int pad = 10;
+        int gap = 8;
+        int textW = fm.stringWidth(msg);
+        int boxH = Math.max(spin, fm.getHeight()) + pad;
+        int boxW = pad + spin + gap + textW + pad;
+        int x = 12;
+        int y = 12;
+        g.setColor(new Color(0, 0, 0, 180));
+        g.fillRoundRect(x, y, boxW, boxH, 12, 12);
+        int cx = x + pad;
+        int cy = y + (boxH - spin) / 2;
+        int start = (spinnerTick * 30) % 360;
+        g.setColor(Color.WHITE);
+        g.setStroke(new BasicStroke(2.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.drawArc(cx, cy, spin, spin, start, 270);
+        g.drawString(msg, cx + spin + gap, y + (boxH + fm.getAscent() - fm.getDescent()) / 2);
     }
 
     // Non-blocking accessors: return the cached range (seeded with the fallback,
@@ -884,17 +1146,40 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
     }
 
-    /** True when the view moved to a new tile footprint / zoom since the last auto load. */
+    /** True when the view has PANNED to a new area since the last auto load. A zoom
+     * change alone does NOT count: the view centre leaving the last-loaded bounds is
+     * a genuine pan, whereas zooming in/out keeps the centre put and the coverage we
+     * already downloaded still covers it (the LOD filter handles resolution). */
     private boolean autoViewChanged(Bounds bbox, MapView mv) {
-        int zoom = screenZoom(bbox, mv.getWidth());
+        double lonSpan = bbox.getMaxLon() - bbox.getMinLon();
+        LatLon centre = new LatLon(
+                (bbox.getMinLat() + bbox.getMaxLat()) / 2.0,
+                (bbox.getMinLon() + bbox.getMaxLon()) / 2.0);
         Bounds last = lastAutoBounds;
-        boolean changed = last == null || zoom != lastAutoZoom
-                || !last.contains(bbox.getMin()) || !last.contains(bbox.getMax());
-        if (changed) {
+        if (last == null || lastAutoLonSpan <= 0) {
+            // First activation in detail mode: load the current view once.
             lastAutoBounds = new Bounds(bbox);
-            lastAutoZoom = zoom;
+            lastAutoLonSpan = lonSpan;
+            return true;
         }
-        return changed;
+        // ZOOM = the view extent changed. NEVER triggers a download: a pan keeps the
+        // extent essentially bit-identical, whereas any zoom (including sub-integer
+        // wheel-zoom that recentres toward the cursor) changes the span. Re-baseline
+        // to the new view so the next same-extent pan is still detected — this is
+        // also what re-arms auto-load after you zoom out to overview and back in.
+        double ratio = lonSpan / lastAutoLonSpan;
+        if (ratio < 0.99 || ratio > 1.01) {
+            lastAutoBounds = new Bounds(bbox);
+            lastAutoLonSpan = lonSpan;
+            return false;
+        }
+        // Same extent → a genuine pan is the view centre leaving the last-loaded box.
+        if (!last.contains(centre)) {
+            lastAutoBounds = new Bounds(bbox);
+            lastAutoLonSpan = lonSpan;
+            return true;
+        }
+        return false;
     }
 
     private void showTooLarge(long tiles) {
@@ -940,6 +1225,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
         lastNearestFeature = nearest.feature;
         lastNearestPoint = nearest.point;
+        // No cone until a specific frame (with a heading) is shown by the dialog.
+        coneBearingDeg = null;
+        cone360 = false;
         invalidate();
         if (e.getClickCount() >= 2) {
             // Double-click still opens the web viewer (deep link) as a convenience.
@@ -1010,7 +1298,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
     @Override
     public Icon getIcon() {
         try {
-            return ImageProvider.get("maprizon");
+            // Scale to JOSM's standard layer-icon size — the source PNG is 64px so
+            // without this the layers list renders it oversized (row-height-tall).
+            return new ImageProvider("maprizon").setSize(ImageProvider.ImageSizes.LAYER).get();
         } catch (RuntimeException e) {
             return null;
         }

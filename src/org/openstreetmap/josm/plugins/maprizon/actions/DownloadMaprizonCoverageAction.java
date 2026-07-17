@@ -1,3 +1,5 @@
+// Maprizon JOSM plugin — Copyright (C) 2026 Kaart Group
+// SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.actions;
 
 import org.openstreetmap.josm.actions.JosmAction;
@@ -22,7 +24,7 @@ public class DownloadMaprizonCoverageAction extends JosmAction {
     public DownloadMaprizonCoverageAction() {
         super(
                 "Download Maprizon coverage (current view)",
-                new ImageProvider("maprizon"),
+                new ImageProvider("maprizon").setSize(ImageProvider.ImageSizes.SMALLICON),
                 "Download Maprizon street-level imagery coverage for the current view",
                 Shortcut.registerShortcut(
                         "maprizon:downloadcoverage",

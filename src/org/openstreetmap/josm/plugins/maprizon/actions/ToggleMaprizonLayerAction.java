@@ -1,3 +1,5 @@
+// Maprizon JOSM plugin — Copyright (C) 2026 Kaart Group
+// SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.actions;
 
 import org.openstreetmap.josm.actions.JosmAction;
@@ -20,7 +22,7 @@ public class ToggleMaprizonLayerAction extends JosmAction {
     public ToggleMaprizonLayerAction() {
         super(
                 "Maprizon Coverage",
-                new ImageProvider("maprizon"),
+                new ImageProvider("maprizon").setSize(ImageProvider.ImageSizes.SMALLICON),
                 "Show/hide the Maprizon street-level imagery coverage layer",
                 Shortcut.registerShortcut(
                         "view:maprizoncoverage",
