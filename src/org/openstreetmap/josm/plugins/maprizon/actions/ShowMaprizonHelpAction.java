@@ -23,8 +23,8 @@ public class ShowMaprizonHelpAction extends JosmAction {
     private static final String HELP_HTML =
             "<html><body style='width:440px'>"
             + "<h2>Maprizon coverage</h2>"
-            + "<p>Shows <b>Maprizon</b> street-level imagery coverage (Kaart's viewer) as a "
-            + "layer in JOSM, and lets you view the actual photos without leaving the editor.</p>"
+            + "<p>Shows <b>Maprizon</b> street-level imagery coverage as a layer in JOSM, and "
+            + "lets you view the actual photos without leaving the editor.</p>"
             + "<h3>Getting started</h3>"
             + "<ul>"
             + "<li><b>Show the layer:</b> Maprizon menu &rarr; <i>Maprizon Coverage</i> "
