@@ -30,7 +30,7 @@ audience `https://Viewer/api/authorize`, RS256 (server `flaskr/auth/auth.py`,
 `views/Images.py`, `views/Sequence.py`).
 
 **Config (verified 2026-07-14):** tenant **`dev-p6r3cciondp4has2.us.auth0.com`**
-(confirmed as prod's tenant via the live `viewer.kaart.com/api/auth/login`
+(confirmed as prod's tenant via the live `app.maprizon.com/api/auth/login`
 redirect), audience `https://Viewer/api/authorize`, baked-in public client_id
 `u5qORFUqta4x7NnujJ83QVRIJL50JzOa` (`ViewerAuth.CLIENT_ID`). No client secret.
 

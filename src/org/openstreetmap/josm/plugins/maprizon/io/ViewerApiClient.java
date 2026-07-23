@@ -42,7 +42,7 @@ import java.util.Map;
 public final class ViewerApiClient {
 
     /** Production viewer backend base — mirrors {@code client/src/config.js} API_ENDPOINT. */
-    private static final String API_BASE = "https://viewer.kaart.com/backend/api/";
+    private static final String API_BASE = "https://app.maprizon.com/backend/api/";
 
     /** HTTP timeouts so a slow/unresponsive backend can never hang the loader
      * thread indefinitely (which wedged the whole image dialog on "Loading…"). */

@@ -1,6 +1,6 @@
 # Maprizon JOSM Plugin
 
-View [Maprizon](https://viewer.kaart.com) street-level imagery coverage inside
+View [Maprizon](https://app.maprizon.com) street-level imagery coverage inside
 JOSM, and browse the actual photos without leaving the editor.
 
 ## Features

@@ -1449,7 +1449,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * still features (the rest of the link is unaffected).
      */
     static String buildDeepLink(ImageryFeature feature, double lat, double lon) {
-        StringBuilder qs = new StringBuilder("https://viewer.kaart.com/?");
+        StringBuilder qs = new StringBuilder("https://app.maprizon.com/?");
         boolean first = true;
         first = appendParam(qs, "sequence_id", feature.getSequenceId(), first);
         first = appendParam(qs, "sequence_index", feature.getSequenceIndex(), first);
