@@ -182,6 +182,26 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * Concurrent: read + written on the loader thread, cleared on the EDT. */
     private final Set<String> loadedTileKeys = ConcurrentHashMap.newKeySet();
 
+    /** REQUESTED tiles that were fetched successfully and yielded NOTHING — a
+     * negative cache, kept separate from {@link #loadedTileKeys} so the two stay
+     * independently inspectable and so "clear coverage" can drop both.
+     *
+     * <p>Why this exists: an empty tile used to be recorded nowhere, so every
+     * later download re-probed it — and a probe is not cheap, since
+     * {@link #loadWithOverzoom} walks up to {@code MAX_OVERZOOM_STEPS + 1} zoom
+     * levels per tile, per facing. Working an area with partial coverage meant
+     * paying the full ancestor walk for the dead ground on EVERY download, which
+     * is a large part of why repeated downloads felt slow.
+     *
+     * <p>The original "an empty result must be retried" intent is preserved on
+     * the axis that matters: only a SUCCESSFUL empty fetch lands here. A tile
+     * that failed with an IOException is recorded in neither set, so transient
+     * network failures still retry. This cache is session-scoped and cleared by
+     * "Clear downloaded coverage", so newly-baked imagery is one menu click
+     * away rather than needing a JOSM restart.
+     * Concurrent: read + written on the loader thread, cleared on the EDT. */
+    private final Set<String> emptyTileKeys = ConcurrentHashMap.newKeySet();
+
     /** Keys of every stored feature (see {@link #featureKey}) for cross-tile,
      * cross-download dedup in {@link #merge}. EDT-mutated; cleared with coverage. */
     private final Set<String> storedFeatureKeys = ConcurrentHashMap.newKeySet();
@@ -602,6 +622,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Drop all downloaded coverage (start fresh). */
     public void clearCoverage() {
         loadedTileKeys.clear();
+        // Also drop the negative cache, so "Clear downloaded coverage" is the one
+        // action that makes the layer re-probe EVERYTHING — including ground that
+        // was empty last time but may have been baked since.
+        emptyTileKeys.clear();
         storedFeatureKeys.clear();
         featuresByFacing = new HashMap<>();
         lastAutoBounds = null;
@@ -647,16 +671,28 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // the native z15 tile per requested tile: full-resolution geometry,
                 // clipped losslessly by bbox, matching what the web viewer renders.
                 int zoom = screenZoom(view, widthPx);
+                // Level of detail uses the RAW (unclamped) screen zoom, exactly as
+                // paint() does — the clamped request zoom would misreport detail
+                // mode whenever the view is deeper than the archive's max.
+                boolean detailMode = rawScreenZoom(view, widthPx) >= USABLE_ZOOM;
                 diagReset("==== MAPRIZON DOWNLOAD " + BUILD_TAG + " ====");
                 diag(String.format(Locale.ROOT,
-                        "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b enabled=%s",
+                        "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b detail=%b enabled=%s",
                         view.getMinLon(), view.getMaxLon(), view.getMinLat(), view.getMaxLat(),
-                        widthPx, zoom, archiveMinZoom(), archiveMaxZoom(), enforceBudget, enabledFacings));
+                        widthPx, zoom, archiveMinZoom(), archiveMaxZoom(), enforceBudget, detailMode, enabledFacings));
                 Map<String, int[]> rangesByFacing = new LinkedHashMap<>();
                 long totalNewTiles = 0;
                 for (String facing : FacingStyle.ALL_FACINGS) {
                     if (!enabledFacings.contains(facing)) {
                         diag("plan facing=" + facing + " SKIPPED (disabled)");
+                        continue;
+                    }
+                    // Don't fetch what cannot be drawn at this zoom. Zoomed out that
+                    // is four of the five facings — the single biggest source of
+                    // "downloads far more than the view" on an overview download.
+                    if (!facingRendersAt(facing, detailMode)) {
+                        diag("plan facing=" + facing + " SKIPPED (overview: only "
+                                + OVERVIEW_FACING + " renders)");
                         continue;
                     }
                     int[] r = tileRange(view, zoom);
@@ -672,6 +708,19 @@ public class MaprizonLayer extends Layer implements MouseListener {
                             facing, zoom, r[0], r[1], r[2], r[3], tiles, newTiles,
                             nw[0], se[2], se[1], nw[3]));
                     totalNewTiles += newTiles;
+                }
+
+                // Nothing renderable to fetch. Reachable when zoomed out with the
+                // 360 facing switched off in the layer menu: the overview gate
+                // leaves no facing, so without this the download would spin a
+                // spinner and finish having silently done nothing. Say why.
+                if (rangesByFacing.isEmpty()) {
+                    diag("plan EMPTY: no renderable facing at this zoom");
+                    if (userInitiated) {
+                        final boolean overviewOnly = !detailMode;
+                        SwingUtilities.invokeLater(() -> showNothingToDownload(overviewOnly));
+                    }
+                    return;
                 }
 
                 if (enforceBudget && totalNewTiles > MAX_TILES_PER_DOWNLOAD) {
@@ -697,18 +746,25 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     for (int tx = r[0]; tx <= r[1]; tx++) {
                         for (int ty = r[2]; ty <= r[3]; ty++) {
                             String key = tileKey(facing, zoom, tx, ty);
-                            if (loadedTileKeys.contains(key)) {
+                            if (loadedTileKeys.contains(key) || emptyTileKeys.contains(key)) {
                                 continue;
                             }
                             try {
                                 List<ImageryFeature> tileFeats =
                                         loadWithOverzoom(facing, zoom, tx, ty, ancestorCache);
                                 acc.addAll(tileFeats);
-                                // Record the REQUESTED tile persistently so a later
-                                // download skips it — but ONLY if it actually yielded
-                                // features. An empty result must be retried on a later
-                                // download, not skipped forever.
-                                if (!tileFeats.isEmpty()) {
+                                // Record the REQUESTED tile so a later download skips
+                                // it. Split by outcome: tiles WITH features go in the
+                                // main ledger, tiles that came back genuinely empty go
+                                // in the negative cache (see emptyTileKeys) so the dead
+                                // ground in a partially-covered area stops costing a
+                                // full ancestor walk on every download. Reaching this
+                                // line at all means the fetch SUCCEEDED — an IOException
+                                // lands below and records nothing, so real failures
+                                // still retry.
+                                if (tileFeats.isEmpty()) {
+                                    emptyTileKeys.add(key);
+                                } else {
                                     loadedTileKeys.add(key);
                                 }
                             } catch (IOException ioe) {
@@ -984,11 +1040,16 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return kept;
     }
 
+    /** Tiles in {@code r} that the fetch loop would actually do work for. The skip
+     * condition MUST match {@link #submitDownload}'s (both ledgers), or the
+     * area-too-large budget counts tiles that are about to be skipped and refuses
+     * downloads that would in fact be cheap. */
     private long countNewTiles(String facing, int zoom, int[] r) {
         long n = 0;
         for (int tx = r[0]; tx <= r[1]; tx++) {
             for (int ty = r[2]; ty <= r[3]; ty++) {
-                if (!loadedTileKeys.contains(tileKey(facing, zoom, tx, ty))) {
+                String key = tileKey(facing, zoom, tx, ty);
+                if (!loadedTileKeys.contains(key) && !emptyTileKeys.contains(key)) {
                     n++;
                 }
             }
@@ -1040,10 +1101,31 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * been stored yet (show whatever exists).
      */
     private boolean lodVisible(ImageryFeature f, boolean detailMode, int maxSourceZoom) {
-        if (!detailMode) {
-            return OVERVIEW_FACING.equals(f.getFacing());
+        if (!facingRendersAt(f.getFacing(), detailMode)) {
+            return false;
         }
         return maxSourceZoom < 0 || f.getSourceZoom() >= maxSourceZoom;
+    }
+
+    /**
+     * SSOT for "can this facing appear on screen at this level of detail?" —
+     * shared by the paint filter ({@link #lodVisible}) and the download planner
+     * in {@link #submitDownload}.
+     *
+     * <p>It exists because those two disagreed. Paint has always shown only
+     * {@link #OVERVIEW_FACING} when zoomed out, but the download fetched every
+     * enabled facing regardless — so an overview download pulled all five
+     * facings to render one. That is not a useful pre-fetch either:
+     * {@link #maxStoredSourceZoom} is a single layer-wide monotonic maximum, so
+     * the first detail download anywhere in the session raises it above those
+     * coarse features and {@link #lodVisible} hides them permanently. They stay
+     * in memory, cost merge/dedup time, and never paint again.
+     *
+     * <p>Keeping the rule in one place is the point: if the overview policy
+     * changes, paint and download cannot drift apart again.
+     */
+    private static boolean facingRendersAt(String facing, boolean detailMode) {
+        return detailMode || OVERVIEW_FACING.equals(facing);
     }
 
     /** (Re)start the debounce timer for an auto-download of the given view; a fresh
@@ -1189,6 +1271,22 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         "Zoom in further and download again — coverage accumulates across downloads.",
                 "Maprizon: zoom in to download",
                 JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    /** Explicit download that planned no tiles because no enabled facing can render
+     * at this zoom. Names the actual cause and the actual fix, rather than leaving
+     * the user with a download that appeared to do nothing. */
+    private void showNothingToDownload(boolean overviewOnly) {
+        String msg = overviewOnly
+                ? "Nothing to download at this zoom.\n\n"
+                        + "Zoomed out, only the " + OVERVIEW_FACING + " facing is drawn, and it is\n"
+                        + "currently hidden (layer right-click menu). Re-enable it, or zoom\n"
+                        + "in far enough to show individual images and every enabled facing\n"
+                        + "will download."
+                : "Nothing to download: all camera facings are hidden.\n\n"
+                        + "Re-enable at least one from the layer's right-click menu.";
+        JOptionPane.showMessageDialog(MainApplication.getMainFrame(), msg,
+                "Maprizon", JOptionPane.INFORMATION_MESSAGE);
     }
 
     public boolean isAutoRefresh() {
