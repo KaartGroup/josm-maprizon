@@ -269,12 +269,43 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Login/logout flips the tile scope (public bake vs the org's private bake),
      * so accumulated coverage + the tile ledger are stale — drop them so the next
      * download pulls from the correct bake. */
-    private final Runnable authListener = () -> SwingUtilities.invokeLater(this::clearCoverage);
+    private final Runnable authListener = () -> SwingUtilities.invokeLater(this::onAuthChanged);
 
     public MaprizonLayer() {
-        super("Maprizon Coverage");
+        super(audienceLayerName());
         enabledFacings.addAll(FacingStyle.ALL_FACINGS);
         ViewerAuth.getInstance().addLoginStateListener(authListener);
+    }
+
+    /**
+     * Layer name that states WHICH dataset is loaded — "public" or the org.
+     *
+     * <p>Nothing in the UI used to say this, and it is the single most confusing
+     * thing about the plugin: logged out you see only public imagery, which today
+     * is one small area, so an empty map reads as "the plugin is broken" rather
+     * than "you are looking at the public dataset". A reporter spent an afternoon
+     * on exactly that. The layer name is always visible and costs nothing.
+     */
+    private static String audienceLayerName() {
+        ViewerAuth auth = ViewerAuth.getInstance();
+        if (auth.isLoggedIn()) {
+            String org = auth.orgId();
+            String who = auth.email();
+            if (!who.isEmpty()) {
+                return "Maprizon Coverage — " + who;
+            }
+            if (org != null && !org.isEmpty()) {
+                return "Maprizon Coverage — " + org;
+            }
+        }
+        return "Maprizon Coverage — public imagery only";
+    }
+
+    /** Login/logout: drop coverage (it belongs to the other audience) AND relabel,
+     * so the layer never claims to hold a dataset it no longer has. */
+    private void onAuthChanged() {
+        clearCoverage();
+        setName(audienceLayerName());
     }
 
     @Override
@@ -1631,7 +1662,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
             });
         }
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
-        actions.add(new AbstractAction("View in Maprizon") {
+        // Say what the link will actually DO before it opens a browser. The deep
+        // link carries no credentials, so what the recipient sees depends entirely
+        // on the browser's own session: public imagery loads for anyone (which read
+        // as a privacy leak to one reporter), while private imagery silently 404s
+        // in a logged-out browser (which reads as broken). Same button, opposite
+        // confusing outcomes — so name the outcome.
+        actions.add(new AbstractAction(ViewerAuth.getInstance().isLoggedIn()
+                ? "View in Maprizon (opens private imagery — needs a browser login)"
+                : "View in Maprizon (public link)") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 openInMaprizon();
