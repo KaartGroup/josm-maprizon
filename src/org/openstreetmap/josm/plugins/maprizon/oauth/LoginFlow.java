@@ -41,7 +41,7 @@ import java.util.Map;
  * {@link ViewerAuth#exchangeCode}.
  *
  * <p>Purely additive to the anonymous experience — only ever reached from the
- * explicit "Log in to Viewer" menu action.
+ * explicit "Log in to Maprizon" menu action.
  */
 public final class LoginFlow {
 

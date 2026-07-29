@@ -49,6 +49,117 @@ public final class ViewerApiClient {
     private static final int CONNECT_TIMEOUT_MS = 10_000;
     private static final int READ_TIMEOUT_MS = 20_000;
 
+    /**
+     * One batch of presigned per-facing PMTiles URLs, plus the instant they stop
+     * working. Immutable; {@code null} is never a member.
+     *
+     * <p>SSOT note: {@link #expiresAtEpochSeconds} is the SERVER's number, taken
+     * verbatim from the response. The signing TTL lives in exactly one place —
+     * {@code _TILES_SIGN_TTL_SECONDS} in {@code server/flaskr/views/Tiles.py} —
+     * and is deliberately NOT mirrored here. A client-side copy of a server TTL
+     * is precisely the drift that breaks silently when the server value changes.
+     */
+    public static final class SignedTileUrls {
+        /** facing -> fully-qualified presigned https URL. Use VERBATIM: the
+         * signature is embedded in the query string, so rebuilding or
+         * re-encoding the URL invalidates it. */
+        public final Map<String, String> urls;
+        /** Epoch SECONDS (not millis — the server sends seconds; see Tiles.py). */
+        public final long expiresAtEpochSeconds;
+
+        SignedTileUrls(Map<String, String> urls, long expiresAtEpochSeconds) {
+            // Actually unmodifiable, not just documented as such: this instance is
+            // cached and read from the tile-loader thread, and a caller mutating
+            // the shared map would corrupt another facing's signature.
+            this.urls = java.util.Collections.unmodifiableMap(urls);
+            this.expiresAtEpochSeconds = expiresAtEpochSeconds;
+        }
+    }
+
+    /**
+     * Fetch presigned URLs for the logged-in user's per-org baked PMTiles.
+     *
+     * <p>Why this exists: the per-org tilesets became PRIVATE in Spaces on
+     * 2026-07-22 (viewer commit "making tiles private", which flipped the
+     * tile-baker's upload ACL to {@code private} for every non-public scope and
+     * added this endpoint). Fetching {@code {org_id}-{facing}.pmtiles} directly
+     * has returned HTTP 403 ever since, which is why logged-in downloads stopped
+     * working entirely while anonymous ones kept succeeding.
+     *
+     * <p>The org is derived server-side FROM THE TOKEN — we deliberately send no
+     * org parameter, and the server ignores one if supplied, so a client can
+     * never ask for another org's tiles.
+     *
+     * <p>One call returns every facing; never call it per-facing.
+     *
+     * <p>Follows this class's convention: never throws. Returns {@code null} on
+     * any failure (not logged in, network, non-200, malformed body) so callers
+     * fall back to the public path rather than erroring.
+     *
+     * <p>Blocking — may perform a token refresh. Call OFF the EDT.
+     */
+    public static SignedTileUrls signedTileUrls() {
+        String token = ViewerAuth.getInstance().getValidAccessToken();
+        if (token == null) {
+            return null; // anonymous: caller uses the public, unsigned bake
+        }
+        try {
+            HttpClient.Response res = HttpClient
+                    .create(new URL(API_BASE + "tiles/sign"))
+                    .setHeader("Authorization", "Bearer " + token)
+                    .setHeader("Accept", "application/json")
+                    .setConnectTimeout(CONNECT_TIMEOUT_MS)
+                    .setReadTimeout(READ_TIMEOUT_MS)
+                    .connect();
+            if (res.getResponseCode() != 200) {
+                // Two different error shapes reach here: the auth layer returns
+                // {"code","description"} (401/403) while the endpoint itself
+                // returns {"error"} (403 no-org, 500 signing failure). Log the
+                // status; the body is not needed to decide what to do (fall back).
+                Logging.warn("Maprizon: tiles/sign returned HTTP " + res.getResponseCode());
+                return null;
+            }
+            try (JsonReader reader = Json.createReader(
+                    new ByteArrayInputStream(res.fetchContent().getBytes(StandardCharsets.UTF_8)))) {
+                JsonObject root = reader.readObject();
+                JsonObject urlsObj = root.getJsonObject("urls");
+                if (urlsObj == null) {
+                    Logging.warn("Maprizon: tiles/sign response had no \"urls\" object");
+                    return null;
+                }
+                Map<String, String> urls = new HashMap<>();
+                for (String facing : urlsObj.keySet()) {
+                    String signed = urlsObj.getString(facing, null);
+                    if (signed != null && !signed.isEmpty()) {
+                        urls.put(facing, signed);
+                    }
+                }
+                if (urls.isEmpty()) {
+                    Logging.warn("Maprizon: tiles/sign returned no usable URLs");
+                    return null;
+                }
+                // The server signs every facing it knows about (currently six,
+                // including "drone"); this plugin only asks for the five in
+                // FacingStyle.ALL_FACINGS. Extra keys are kept rather than
+                // filtered — harmless, and it means adding a facing to the
+                // plugin needs no change here.
+                // Read once — a second getJsonNumber() call would re-resolve the
+                // key and, if it were ever a non-number, throw from a different
+                // line than the one that checked it.
+                JsonNumber expiresNum = root.getJsonNumber("expiresAt");
+                long expiresAt = expiresNum != null ? expiresNum.longValue() : 0L;
+                if (expiresAt <= 0L) {
+                    Logging.warn("Maprizon: tiles/sign response had no usable expiresAt");
+                    return null;
+                }
+                return new SignedTileUrls(urls, expiresAt);
+            }
+        } catch (IOException | RuntimeException e) {
+            Logging.warn("Maprizon: tiles/sign failed, falling back to public tiles: " + e);
+            return null;
+        }
+    }
+
     /** The ordered frames of a sequence plus the index of the clicked frame. */
     public static final class SequenceResult {
         public final List<ImageryFeature> frames;

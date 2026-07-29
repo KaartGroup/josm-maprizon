@@ -682,6 +682,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         widthPx, zoom, archiveMinZoom(), archiveMaxZoom(), enforceBudget, detailMode, enabledFacings));
                 Map<String, int[]> rangesByFacing = new LinkedHashMap<>();
                 long totalNewTiles = 0;
+                // Tracked alongside newTiles so an empty download can tell "you
+                // already have this" apart from "we already checked, and there is
+                // no imagery here" — see showNothingAdded. Without this the
+                // negative tile cache makes a second download over empty ground
+                // report "already downloaded", which is not true and not useful.
+                long totalTiles = 0;
+                long knownEmptyTiles = 0;
                 for (String facing : FacingStyle.ALL_FACINGS) {
                     if (!enabledFacings.contains(facing)) {
                         diag("plan facing=" + facing + " SKIPPED (disabled)");
@@ -699,6 +706,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     rangesByFacing.put(facing, r);
                     long tiles = (long) (r[1] - r[0] + 1) * (r[3] - r[2] + 1);
                     long newTiles = countNewTiles(facing, zoom, r);
+                    totalTiles += tiles;
+                    knownEmptyTiles += countKnownEmptyTiles(facing, zoom, r);
                     // Geographic extent the requested tile range covers, to compare
                     // against the view bbox above (should match closely).
                     double[] nw = tileBounds(zoom, r[0], r[2]); // {west,south,east,north}
@@ -777,6 +786,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 }
 
                 final int reqZoom = zoom;
+                // Carried into the dialog below so it can name the ACTUAL cause of
+                // an empty download: nothing planned (all tiles already known) is a
+                // completely different situation from "we fetched and there is no
+                // imagery here", and they need opposite advice.
+                final long plannedTiles = totalNewTiles;
+                // "Every tile in view is one we already probed and found empty" —
+                // i.e. genuinely no imagery here, not a stale cache.
+                final boolean allKnownEmpty = totalTiles > 0 && knownEmptyTiles == totalTiles;
                 SwingUtilities.invokeLater(() -> {
                     // Merge dedups (a line spans many tiles); report what was ADDED
                     // per facing, so a download states exactly what it contributed.
@@ -804,11 +821,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
                                 .setDuration(Notification.TIME_LONG).show();
                     }
                     if (userInitiated && added == 0) {
-                        JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
-                                "No new Maprizon coverage was added for this view.\n" +
-                                        "Already-downloaded tiles are skipped — use \"Clear downloaded\n" +
-                                        "coverage\" (layer menu) to refetch, or try a different area.",
-                                "Maprizon", JOptionPane.INFORMATION_MESSAGE);
+                        showNothingAdded(plannedTiles, allKnownEmpty);
                     }
                 });
             } catch (Exception ex) {
@@ -1038,6 +1051,21 @@ public class MaprizonLayer extends Layer implements MouseListener {
             }
         }
         return kept;
+    }
+
+    /** Tiles in {@code r} already fetched once and found to contain nothing (the
+     * negative cache). Used only to explain an empty download honestly — see
+     * {@link #showNothingAdded}. */
+    private long countKnownEmptyTiles(String facing, int zoom, int[] r) {
+        long n = 0;
+        for (int tx = r[0]; tx <= r[1]; tx++) {
+            for (int ty = r[2]; ty <= r[3]; ty++) {
+                if (emptyTileKeys.contains(tileKey(facing, zoom, tx, ty))) {
+                    n++;
+                }
+            }
+        }
+        return n;
     }
 
     /** Tiles in {@code r} that the fetch loop would actually do work for. The skip
@@ -1273,6 +1301,54 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 JOptionPane.INFORMATION_MESSAGE);
     }
 
+    /**
+     * A user-initiated download that added nothing. There are two very different
+     * reasons for that, and the old single message asserted the wrong one.
+     *
+     * <p>It used to say "Already-downloaded tiles are skipped — use Clear
+     * downloaded coverage", unconditionally. When the real cause was "there is no
+     * imagery in this area" that advice was not merely unhelpful, it was a dead
+     * end: clearing coverage and re-downloading reproduces the same empty result
+     * forever. A reporter lost an afternoon to exactly that loop — clearing,
+     * restarting JOSM, and re-logging in, none of which could have worked.
+     *
+     * @param plannedTiles  tiles the planner actually intended to fetch. Zero means
+     *                      every tile was already in a ledger; non-zero means we
+     *                      really did fetch and the archives had nothing here.
+     * @param allKnownEmpty every tile in view is one we previously fetched and
+     *                      found empty. Without this flag the negative tile cache
+     *                      makes a repeat download over empty ground look like
+     *                      "already downloaded", which is both false and the exact
+     *                      misdirection this dialog exists to stop.
+     */
+    private void showNothingAdded(long plannedTiles, boolean allKnownEmpty) {
+        String msg;
+        if (plannedTiles == 0 && !allKnownEmpty) {
+            msg = "Everything in this view has already been downloaded.\n\n"
+                    + "Pan or zoom to new ground, or use \"Clear downloaded coverage\"\n"
+                    + "(layer right-click menu) to fetch it again from scratch.";
+        } else {
+            StringBuilder b = new StringBuilder();
+            // Worded to be true whether we fetched just now or are reporting a
+            // previously-probed empty area — in both cases nothing is wrong.
+            b.append("No Maprizon imagery exists in this view.\n\n")
+             .append("This is not an error: the archives simply have no coverage here.\n")
+             .append("Clearing downloaded coverage will not change this.\n\n");
+            if (ViewerAuth.getInstance().isLoggedIn()) {
+                b.append("You are logged in, so this covers your organization's imagery\n")
+                 .append("as well as public imagery. Try an area you know has been driven.");
+            } else {
+                b.append("You are NOT logged in, so only PUBLIC imagery is visible, and\n")
+                 .append("public coverage is limited to a small area. Use \"Log in to\n")
+                 .append("Maprizon\" in the layer's right-click menu to see your\n")
+                 .append("organization's imagery.");
+            }
+            msg = b.toString();
+        }
+        JOptionPane.showMessageDialog(MainApplication.getMainFrame(), msg,
+                "Maprizon", JOptionPane.INFORMATION_MESSAGE);
+    }
+
     /** Explicit download that planned no tiles because no enabled facing can render
      * at this zoom. Names the actual cause and the actual fix, rather than leaving
      * the user with a download that appeared to do nothing. */
@@ -1454,7 +1530,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         ViewerAuth auth = ViewerAuth.getInstance();
         if (auth.isLoggedIn()) {
             String who = auth.email().isEmpty() ? "" : " (" + auth.email() + ")";
-            actions.add(new AbstractAction("Log out of Viewer" + who) {
+            actions.add(new AbstractAction("Log out of Maprizon" + who) {
                 @Override
                 public void actionPerformed(ActionEvent e) {
                     auth.logout();
@@ -1462,7 +1538,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 }
             });
         } else {
-            actions.add(new AbstractAction("Log in to Viewer (view private imagery)") {
+            actions.add(new AbstractAction("Log in to Maprizon (view private imagery)") {
                 @Override
                 public void actionPerformed(ActionEvent e) {
                     LoginFlow.start(MaprizonLayer.this::invalidate);

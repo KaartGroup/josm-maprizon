@@ -56,7 +56,11 @@ public final class FacingStyle {
     /** Scope prefix for anonymous visitors — the public bake. Authenticated users
      * read their org's bake ({@code <org_id>-<facing>.pmtiles}) instead, which is
      * the SAME shape but a DIFFERENT (and more complete) file — the viewer does
-     * exactly this in useMapTileUrls. */
+     * exactly this in useMapTileUrls.
+     *
+     * <p>Access differs, though, and that difference is load-bearing: the public
+     * bake is public-read, while org bakes are PRIVATE and reachable only via
+     * presigned URLs. See {@link #pmtilesUrlFor(String, String)}. */
     public static final String PUBLIC_SCOPE = "public_imagery";
 
     /** Name of the single vector layer present inside every per-facing PMTiles archive. */
@@ -75,9 +79,22 @@ public final class FacingStyle {
         return pmtilesUrlFor(facing, PUBLIC_SCOPE);
     }
 
-    /** Per-facing PMTiles URL for a given scope: {@code public_imagery} for
-     * anonymous visitors, or an Auth0 org id (e.g. {@code org_9alzx7S32reIQ86s})
-     * for an authenticated org user — matching the viewer's per-facing tilesets. */
+    /**
+     * Per-facing PMTiles URL for a given scope.
+     *
+     * <p><b>Only fetchable for {@link #PUBLIC_SCOPE}.</b> Per-org tilesets became
+     * PRIVATE in Spaces on 2026-07-22 (viewer commit "making tiles private"), so
+     * the URL this builds for an org scope is well-formed but returns HTTP 403.
+     * Org archives must instead go through
+     * {@code ViewerApiClient.signedTileUrls()}, whose presigned URLs are used
+     * verbatim — the signature is in the query string, so anything rebuilt here
+     * would be invalid by construction.
+     *
+     * <p>The scope parameter is retained rather than hard-coded to public
+     * because {@code PmtilesTileLoader} decides scope in exactly one place and
+     * passes it through; this method simply no longer claims to serve private
+     * scopes.
+     */
     public static String pmtilesUrlFor(String facing, String scope) {
         String s = (scope == null || scope.trim().isEmpty()) ? PUBLIC_SCOPE : scope.trim();
         return TILES_ENDPOINT + "/" + s + "-" + facing + ".pmtiles";

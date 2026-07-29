@@ -44,7 +44,7 @@ public class ShowMaprizonHelpAction extends JosmAction {
             + "scroll to zoom; the map cone tracks where you're looking.</li>"
             + "</ul>"
             + "<h3>Private imagery</h3>"
-            + "<p>Right-click the layer &rarr; <i>Log in to Viewer</i> to see your organization's "
+            + "<p>Right-click the layer &rarr; <i>Log in to Maprizon</i> to see your organization's "
             + "private coverage and images (optional; everything public works logged out).</p>"
             + "<p style='color:#777'>Questions: dev@kaart.com</p>"
             + "</body></html>";
