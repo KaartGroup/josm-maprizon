@@ -1378,10 +1378,58 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     // ----------------------------------------------------------- selection
 
+    /**
+     * Whether a click on the map should select imagery right now.
+     *
+     * <p>This listener is attached to the whole {@code mapView}, so without a gate
+     * it fires for EVERY click in every editing mode. Two reports of the same
+     * cause: drawing a line near a coverage track selected imagery, and clicking
+     * a road to connect a crossing way selected an image underneath it and moved
+     * the viewpoint out from under the mapper mid-edit. Both are the same handler
+     * stealing a click that belonged to the draw tool.
+     *
+     * <p>Implemented as a WHITELIST of the non-editing modes, deliberately not a
+     * blacklist of editing ones. The bias matters: a click we decline to handle
+     * costs the user one extra click in select mode, whereas a click we steal
+     * corrupts an edit in progress and teleports the view. A blacklist would also
+     * silently fail to cover map modes added by other plugins.
+     *
+     * <p>Zoom mode is in the whitelist and carries real weight — it is not merely
+     * permissive. {@code SelectAction.layerIsSupported} is
+     * {@code layer instanceof OsmDataLayer}, so select mode does not exist in an
+     * imagery-only session; {@code ZoomAction} inherits {@code MapMode}'s default
+     * ("any non-null layer"), so it is the mode available when no OSM data layer
+     * is loaded. Whitelisting select alone would have broken imagery clicking
+     * entirely for imagery-only users — a worse regression than the bug.
+     */
+    private static boolean clickSelectsImagery(MapFrame map) {
+        return map.mapMode == null
+                || map.mapMode == map.mapModeSelect
+                || map.mapMode == map.mapModeSelectLasso
+                || map.mapMode == map.mapModeZoom;
+    }
+
     @Override
     public void mouseClicked(MouseEvent e) {
         MapFrame map = MainApplication.getMap();
         if (map == null || map.mapView == null) {
+            return;
+        }
+        // Plain left-click only. mouseClicked fires for EVERY button, so a
+        // right-click (which opens JOSM's context menu) was also selecting
+        // imagery, and a middle-click likewise. isPopupTrigger is checked as well
+        // because on macOS — where this was reported — ctrl+click is the
+        // right-click gesture and still arrives as BUTTON1.
+        if (e.getButton() != MouseEvent.BUTTON1 || e.isPopupTrigger()) {
+            return;
+        }
+        // A hidden layer must not react to clicks. Nothing is drawn for the user
+        // to have aimed at, so any selection is by definition accidental.
+        if (!isVisible()) {
+            return;
+        }
+        // Don't take a click that belongs to an editing tool — see above.
+        if (!clickSelectsImagery(map)) {
             return;
         }
         lastClickLatLon = map.mapView.getLatLon(e.getX(), e.getY());
