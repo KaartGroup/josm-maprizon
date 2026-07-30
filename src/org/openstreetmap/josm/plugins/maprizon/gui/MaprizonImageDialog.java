@@ -303,16 +303,85 @@ public final class MaprizonImageDialog extends ToggleDialog {
         return d < 0 ? d + 360.0 : d;
     }
 
+    /** Guards against a second crossing being kicked off while one is in flight —
+     * arrow keys autorepeat, so hitting the end of a sequence could otherwise fire
+     * a burst of identical requests. EDT only. */
+    private boolean crossingSequence;
+
     private void step(int delta) {
         if (frames.isEmpty()) {
             return;
         }
         int next = index + delta;
         if (next < 0 || next >= frames.size()) {
+            // End of THIS sequence — continue into the adjacent one rather than
+            // dead-ending. A drive is split into many sequences, so stopping here
+            // made following a long road a manual hunt: the user had to go back to
+            // the map and click the next track by hand.
+            crossToAdjacent(delta);
             return;
         }
         index = next;
         display();
+    }
+
+    /**
+     * Load the next/previous sequence and continue walking into it.
+     *
+     * <p>Off-EDT because it is a network round trip; the web app has the same
+     * delay. The button is disabled and the status says so, rather than the UI
+     * appearing to ignore the click.
+     *
+     * <p>The boundary frame we hand the server is the one at the END we are leaving
+     * (first frame when going backwards, last when going forwards) — that is the
+     * position adjacency should be measured from.
+     */
+    private void crossToAdjacent(int delta) {
+        if (crossingSequence || frames.isEmpty()) {
+            return;
+        }
+        final boolean forward = delta > 0;
+        final ImageryFeature boundary = frames.get(forward ? frames.size() - 1 : 0);
+        final String direction = forward ? "next" : "previous";
+
+        crossingSequence = true;
+        prevButton.setEnabled(false);
+        nextButton.setEnabled(false);
+        status.setText("<html>Loading " + direction + " image set…</html>");
+
+        final long token = loadToken.incrementAndGet();
+        exec.submit(() -> {
+            List<ImageryFeature> seq = ViewerApiClient.fetchAdjacentSequence(boundary, direction);
+            SwingUtilities.invokeLater(() -> {
+                crossingSequence = false;
+                // A click elsewhere while we were fetching supersedes this result;
+                // loadToken moving is how that is detected (same guard the image
+                // loader uses).
+                if (token != loadToken.get()) {
+                    return;
+                }
+                if (seq == null || seq.isEmpty()) {
+                    // Genuinely the end of the drive — say so instead of leaving a
+                    // stale "Loading…" on screen.
+                    //
+                    // Re-enable the buttons directly rather than calling
+                    // displayImpl(): that would immediately overwrite this message
+                    // with the frame counter, so the explanation would flash and
+                    // vanish. Nothing else needs refreshing — the displayed frame
+                    // did not change.
+                    prevButton.setEnabled(true);
+                    nextButton.setEnabled(true);
+                    status.setText("<html>No " + direction + " image set — end of coverage"
+                            + "<br><i>pick another track on the map to continue</i></html>");
+                    return;
+                }
+                frames = seq;
+                // Enter the new sequence from the edge we arrived at, so the walk
+                // continues in the same direction instead of jumping to its middle.
+                index = forward ? 0 : seq.size() - 1;
+                display();
+            });
+        });
     }
 
     private void display() {
@@ -346,8 +415,13 @@ public final class MaprizonImageDialog extends ToggleDialog {
         }
         sb.append("</html>");
         status.setText(sb.toString());
-        prevButton.setEnabled(index > 0);
-        nextButton.setEnabled(index < frames.size() - 1);
+        // Enabled at the edges too, because the edges are no longer dead ends:
+        // stepping past them crosses into the adjacent sequence. Whether one
+        // EXISTS is only knowable by asking the server, so offering the control and
+        // reporting "end of coverage" on a miss beats greying it out and leaving
+        // the user to guess whether the drive continues.
+        prevButton.setEnabled(!crossingSequence);
+        nextButton.setEnabled(!crossingSequence);
         loadImage(f.getImg(), is360);
     }
 

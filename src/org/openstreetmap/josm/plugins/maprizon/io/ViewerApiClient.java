@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -259,6 +260,113 @@ public final class ViewerApiClient {
         } catch (IOException | RuntimeException e) {
             Logging.warn("Maprizon: fetchPublicSequence failed: " + e);
             return null;
+        }
+    }
+
+    /**
+     * The sequence adjacent to {@code boundaryFrame} in {@code direction}
+     * ({@code "next"} or {@code "previous"}), so walking a drive can continue past
+     * the end of one sequence instead of dead-ending.
+     *
+     * <p>Sequence ids are assigned in drive order, and the server navigates to the
+     * NEAREST id in the requested direction rather than exactly ±1 — that is what
+     * heals gaps left by deleted sequences instead of stranding the user at one.
+     *
+     * <p>{@code upload_batch_id} is sent deliberately: same-facing traversal must
+     * be scoped to one upload batch or the same ground comes back duplicated
+     * across batches. (The opposite rule applies to cross-camera queries, which
+     * must NOT filter by it — see the project's conventions.)
+     *
+     * <p>The boundary frame's position and timestamp are sent too. The server uses
+     * them for a proximity check on the candidate, which is what stops a
+     * completely unrelated sequence elsewhere in the trip being served as
+     * "adjacent" when internal GPS timestamps are unreliable.
+     *
+     * <p>Returns {@code null} for "there is nothing adjacent" — a 404 is the normal
+     * answer at the end of a drive, not an error — and for any failure, so callers
+     * simply stay where they are.
+     *
+     * <p>Blocking. Call OFF the EDT.
+     */
+    public static List<ImageryFeature> fetchAdjacentSequence(ImageryFeature boundaryFrame,
+                                                             String direction) {
+        if (boundaryFrame == null || !("next".equals(direction) || "previous".equals(direction))) {
+            return null;
+        }
+        String sequenceId = boundaryFrame.getSequenceId();
+        String tripId = boundaryFrame.getTripId();
+        String facing = boundaryFrame.getFacing();
+        if (sequenceId == null || tripId == null || facing == null) {
+            return null;
+        }
+        String token = ViewerAuth.getInstance().getValidAccessToken();
+        String base = token != null ? "sequence/adjacent/" : "sequence/public/adjacent/";
+        try {
+            StringBuilder qs = new StringBuilder();
+            qs.append(base).append(enc(sequenceId)).append('/').append(direction)
+              .append("?trip_id=").append(enc(tripId))
+              // Server lowercases this itself, but sending it normalized keeps the
+              // request readable in logs and matches what the web client sends.
+              .append("&facing=").append(enc(facing.toLowerCase(Locale.ROOT)));
+            if (boundaryFrame.getUploadBatchId() != null) {
+                qs.append("&upload_batch_id=").append(enc(boundaryFrame.getUploadBatchId()));
+            }
+            List<double[]> pts = boundaryFrame.getPoints();
+            if (pts != null && !pts.isEmpty()) {
+                double[] p = pts.get(0);
+                qs.append("&boundary_lng=").append(p[0]).append("&boundary_lat=").append(p[1]);
+            }
+            if (boundaryFrame.getTimestamp() != null) {
+                qs.append("&boundary_timestamp=").append(enc(boundaryFrame.getTimestamp()));
+            }
+
+            HttpClient client = HttpClient
+                    .create(new URL(API_BASE + qs))
+                    .setHeader("Accept", "application/json")
+                    .setConnectTimeout(CONNECT_TIMEOUT_MS)
+                    .setReadTimeout(READ_TIMEOUT_MS);
+            if (token != null) {
+                client.setHeader("Authorization", "Bearer " + token);
+            }
+            HttpClient.Response res = client.connect();
+
+            int code = res.getResponseCode();
+            if (code == 404) {
+                // End of the drive, or the candidate was rejected as too far from
+                // the boundary. Both are legitimate "nothing there".
+                return null;
+            }
+            if (code != 200) {
+                Logging.warn("Maprizon: adjacent sequence returned HTTP " + code);
+                return null;
+            }
+            try (JsonReader reader = Json.createReader(new ByteArrayInputStream(
+                    res.fetchContent().getBytes(StandardCharsets.UTF_8)))) {
+                JsonObject root = reader.readObject();
+                JsonArray feats = root.getJsonArray("features");
+                if (feats == null) {
+                    return null;
+                }
+                List<ImageryFeature> frames = new ArrayList<>();
+                for (JsonValue v : feats) {
+                    ImageryFeature f = toFeature((JsonObject) v, facing);
+                    if (f != null) {
+                        frames.add(f);
+                    }
+                }
+                return frames.isEmpty() ? null : frames;
+            }
+        } catch (IOException | RuntimeException e) {
+            Logging.warn("Maprizon: fetchAdjacentSequence failed: " + e);
+            return null;
+        }
+    }
+
+    private static String enc(String s) {
+        try {
+            return java.net.URLEncoder.encode(s, StandardCharsets.UTF_8.name());
+        } catch (java.io.UnsupportedEncodingException e) {
+            return s; // UTF-8 is always present; unreachable in practice
         }
     }
 
