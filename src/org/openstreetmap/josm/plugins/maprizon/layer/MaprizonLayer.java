@@ -182,6 +182,26 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * Concurrent: read + written on the loader thread, cleared on the EDT. */
     private final Set<String> loadedTileKeys = ConcurrentHashMap.newKeySet();
 
+    /** REQUESTED tiles that were fetched successfully and yielded NOTHING — a
+     * negative cache, kept separate from {@link #loadedTileKeys} so the two stay
+     * independently inspectable and so "clear coverage" can drop both.
+     *
+     * <p>Why this exists: an empty tile used to be recorded nowhere, so every
+     * later download re-probed it — and a probe is not cheap, since
+     * {@link #loadWithOverzoom} walks up to {@code MAX_OVERZOOM_STEPS + 1} zoom
+     * levels per tile, per facing. Working an area with partial coverage meant
+     * paying the full ancestor walk for the dead ground on EVERY download, which
+     * is a large part of why repeated downloads felt slow.
+     *
+     * <p>The original "an empty result must be retried" intent is preserved on
+     * the axis that matters: only a SUCCESSFUL empty fetch lands here. A tile
+     * that failed with an IOException is recorded in neither set, so transient
+     * network failures still retry. This cache is session-scoped and cleared by
+     * "Clear downloaded coverage", so newly-baked imagery is one menu click
+     * away rather than needing a JOSM restart.
+     * Concurrent: read + written on the loader thread, cleared on the EDT. */
+    private final Set<String> emptyTileKeys = ConcurrentHashMap.newKeySet();
+
     /** Keys of every stored feature (see {@link #featureKey}) for cross-tile,
      * cross-download dedup in {@link #merge}. EDT-mutated; cleared with coverage. */
     private final Set<String> storedFeatureKeys = ConcurrentHashMap.newKeySet();
@@ -249,12 +269,61 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Login/logout flips the tile scope (public bake vs the org's private bake),
      * so accumulated coverage + the tile ledger are stale — drop them so the next
      * download pulls from the correct bake. */
-    private final Runnable authListener = () -> SwingUtilities.invokeLater(this::clearCoverage);
+    private final Runnable authListener = () -> SwingUtilities.invokeLater(this::onAuthChanged);
 
     public MaprizonLayer() {
-        super("Maprizon Coverage");
+        super(audienceLayerName());
         enabledFacings.addAll(FacingStyle.ALL_FACINGS);
         ViewerAuth.getInstance().addLoginStateListener(authListener);
+    }
+
+    /**
+     * Layer name that states WHICH dataset is loaded — "public" or the org.
+     *
+     * <p>Nothing in the UI used to say this, and it is the single most confusing
+     * thing about the plugin: logged out you see only public imagery, which today
+     * is one small area, so an empty map reads as "the plugin is broken" rather
+     * than "you are looking at the public dataset". A reporter spent an afternoon
+     * on exactly that. The layer name is always visible and costs nothing.
+     */
+    private static String audienceLayerName() {
+        ViewerAuth auth = ViewerAuth.getInstance();
+        if (auth.isLoggedIn()) {
+            // Logged in with no org loads the PUBLIC bake, so naming the user here
+            // would imply private coverage that is not present. Say what is
+            // actually loaded, and why.
+            if (isLoggedInWithoutOrg()) {
+                return "Maprizon Coverage — public only (no org on your account)";
+            }
+            String who = auth.email();
+            if (!who.isEmpty()) {
+                return "Maprizon Coverage — " + who;
+            }
+            String org = auth.orgId();
+            if (org != null && !org.isEmpty()) {
+                return "Maprizon Coverage — " + org;
+            }
+        }
+        return "Maprizon Coverage — public imagery only";
+    }
+
+    /** Login/logout: drop coverage (it belongs to the other audience) AND relabel,
+     * so the layer never claims to hold a dataset it no longer has. */
+    private void onAuthChanged() {
+        clearCoverage();
+        setName(audienceLayerName());
+        // Tell the user AT LOGIN if the login bought them nothing, instead of
+        // letting them discover it as "no coverage anywhere" a few downloads later.
+        // A reporter hit exactly that: logged in, added the layer, and saw imagery
+        // only around Cebu — the public bake — with nothing indicating why.
+        if (isLoggedInWithoutOrg()) {
+            new Notification("<html><b>Maprizon: logged in, but no organization</b><br>"
+                    + "Your token carries no organization, so only PUBLIC imagery will<br>"
+                    + "load. Ask an admin to attach your account to an organization.</html>")
+                    .setIcon(JOptionPane.WARNING_MESSAGE)
+                    .setDuration(Notification.TIME_LONG)
+                    .show();
+        }
     }
 
     @Override
@@ -511,7 +580,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     /** Draw a prominent ring + facing-coloured dot at the currently selected
      * feature's clicked point, so a click gives visible confirmation of what is
-     * selected (and thus what "View in Maprizon" / double-click will open). */
+     * selected (and thus what "View in Maprizon" will open). */
     private void paintHighlight(Graphics2D g, MapView mv) {
         Point p = mv.getPoint(new LatLon(lastNearestPoint[1], lastNearestPoint[0]));
         // View cone first, so the selection ring/dot stay on top of it.
@@ -602,6 +671,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Drop all downloaded coverage (start fresh). */
     public void clearCoverage() {
         loadedTileKeys.clear();
+        // Also drop the negative cache, so "Clear downloaded coverage" is the one
+        // action that makes the layer re-probe EVERYTHING — including ground that
+        // was empty last time but may have been baked since.
+        emptyTileKeys.clear();
         storedFeatureKeys.clear();
         featuresByFacing = new HashMap<>();
         lastAutoBounds = null;
@@ -647,22 +720,45 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // the native z15 tile per requested tile: full-resolution geometry,
                 // clipped losslessly by bbox, matching what the web viewer renders.
                 int zoom = screenZoom(view, widthPx);
+                // Level of detail uses the RAW (unclamped) screen zoom, exactly as
+                // paint() does — the clamped request zoom would misreport detail
+                // mode whenever the view is deeper than the archive's max.
+                boolean detailMode = rawScreenZoom(view, widthPx) >= USABLE_ZOOM;
                 diagReset("==== MAPRIZON DOWNLOAD " + BUILD_TAG + " ====");
                 diag(String.format(Locale.ROOT,
-                        "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b enabled=%s",
+                        "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b detail=%b loggedIn=%b orgOnToken=%b enabled=%s",
                         view.getMinLon(), view.getMaxLon(), view.getMinLat(), view.getMaxLat(),
-                        widthPx, zoom, archiveMinZoom(), archiveMaxZoom(), enforceBudget, enabledFacings));
+                        widthPx, zoom, archiveMinZoom(), archiveMaxZoom(), enforceBudget, detailMode,
+                        ViewerAuth.getInstance().isLoggedIn(), !isLoggedInWithoutOrg(),
+                        enabledFacings));
                 Map<String, int[]> rangesByFacing = new LinkedHashMap<>();
                 long totalNewTiles = 0;
+                // Tracked alongside newTiles so an empty download can tell "you
+                // already have this" apart from "we already checked, and there is
+                // no imagery here" — see showNothingAdded. Without this the
+                // negative tile cache makes a second download over empty ground
+                // report "already downloaded", which is not true and not useful.
+                long totalTiles = 0;
+                long knownEmptyTiles = 0;
                 for (String facing : FacingStyle.ALL_FACINGS) {
                     if (!enabledFacings.contains(facing)) {
                         diag("plan facing=" + facing + " SKIPPED (disabled)");
+                        continue;
+                    }
+                    // Don't fetch what cannot be drawn at this zoom. Zoomed out that
+                    // is four of the five facings — the single biggest source of
+                    // "downloads far more than the view" on an overview download.
+                    if (!facingRendersAt(facing, detailMode)) {
+                        diag("plan facing=" + facing + " SKIPPED (overview: only "
+                                + OVERVIEW_FACING + " renders)");
                         continue;
                     }
                     int[] r = tileRange(view, zoom);
                     rangesByFacing.put(facing, r);
                     long tiles = (long) (r[1] - r[0] + 1) * (r[3] - r[2] + 1);
                     long newTiles = countNewTiles(facing, zoom, r);
+                    totalTiles += tiles;
+                    knownEmptyTiles += countKnownEmptyTiles(facing, zoom, r);
                     // Geographic extent the requested tile range covers, to compare
                     // against the view bbox above (should match closely).
                     double[] nw = tileBounds(zoom, r[0], r[2]); // {west,south,east,north}
@@ -672,6 +768,19 @@ public class MaprizonLayer extends Layer implements MouseListener {
                             facing, zoom, r[0], r[1], r[2], r[3], tiles, newTiles,
                             nw[0], se[2], se[1], nw[3]));
                     totalNewTiles += newTiles;
+                }
+
+                // Nothing renderable to fetch. Reachable when zoomed out with the
+                // 360 facing switched off in the layer menu: the overview gate
+                // leaves no facing, so without this the download would spin a
+                // spinner and finish having silently done nothing. Say why.
+                if (rangesByFacing.isEmpty()) {
+                    diag("plan EMPTY: no renderable facing at this zoom");
+                    if (userInitiated) {
+                        final boolean overviewOnly = !detailMode;
+                        SwingUtilities.invokeLater(() -> showNothingToDownload(overviewOnly));
+                    }
+                    return;
                 }
 
                 if (enforceBudget && totalNewTiles > MAX_TILES_PER_DOWNLOAD) {
@@ -697,18 +806,25 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     for (int tx = r[0]; tx <= r[1]; tx++) {
                         for (int ty = r[2]; ty <= r[3]; ty++) {
                             String key = tileKey(facing, zoom, tx, ty);
-                            if (loadedTileKeys.contains(key)) {
+                            if (loadedTileKeys.contains(key) || emptyTileKeys.contains(key)) {
                                 continue;
                             }
                             try {
                                 List<ImageryFeature> tileFeats =
                                         loadWithOverzoom(facing, zoom, tx, ty, ancestorCache);
                                 acc.addAll(tileFeats);
-                                // Record the REQUESTED tile persistently so a later
-                                // download skips it — but ONLY if it actually yielded
-                                // features. An empty result must be retried on a later
-                                // download, not skipped forever.
-                                if (!tileFeats.isEmpty()) {
+                                // Record the REQUESTED tile so a later download skips
+                                // it. Split by outcome: tiles WITH features go in the
+                                // main ledger, tiles that came back genuinely empty go
+                                // in the negative cache (see emptyTileKeys) so the dead
+                                // ground in a partially-covered area stops costing a
+                                // full ancestor walk on every download. Reaching this
+                                // line at all means the fetch SUCCEEDED — an IOException
+                                // lands below and records nothing, so real failures
+                                // still retry.
+                                if (tileFeats.isEmpty()) {
+                                    emptyTileKeys.add(key);
+                                } else {
                                     loadedTileKeys.add(key);
                                 }
                             } catch (IOException ioe) {
@@ -721,6 +837,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 }
 
                 final int reqZoom = zoom;
+                // Carried into the dialog below so it can name the ACTUAL cause of
+                // an empty download: nothing planned (all tiles already known) is a
+                // completely different situation from "we fetched and there is no
+                // imagery here", and they need opposite advice.
+                final long plannedTiles = totalNewTiles;
+                // "Every tile in view is one we already probed and found empty" —
+                // i.e. genuinely no imagery here, not a stale cache.
+                final boolean allKnownEmpty = totalTiles > 0 && knownEmptyTiles == totalTiles;
                 SwingUtilities.invokeLater(() -> {
                     // Merge dedups (a line spans many tiles); report what was ADDED
                     // per facing, so a download states exactly what it contributed.
@@ -748,11 +872,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
                                 .setDuration(Notification.TIME_LONG).show();
                     }
                     if (userInitiated && added == 0) {
-                        JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
-                                "No new Maprizon coverage was added for this view.\n" +
-                                        "Already-downloaded tiles are skipped — use \"Clear downloaded\n" +
-                                        "coverage\" (layer menu) to refetch, or try a different area.",
-                                "Maprizon", JOptionPane.INFORMATION_MESSAGE);
+                        showNothingAdded(plannedTiles, allKnownEmpty);
                     }
                 });
             } catch (Exception ex) {
@@ -984,11 +1104,31 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return kept;
     }
 
+    /** Tiles in {@code r} already fetched once and found to contain nothing (the
+     * negative cache). Used only to explain an empty download honestly — see
+     * {@link #showNothingAdded}. */
+    private long countKnownEmptyTiles(String facing, int zoom, int[] r) {
+        long n = 0;
+        for (int tx = r[0]; tx <= r[1]; tx++) {
+            for (int ty = r[2]; ty <= r[3]; ty++) {
+                if (emptyTileKeys.contains(tileKey(facing, zoom, tx, ty))) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    /** Tiles in {@code r} that the fetch loop would actually do work for. The skip
+     * condition MUST match {@link #submitDownload}'s (both ledgers), or the
+     * area-too-large budget counts tiles that are about to be skipped and refuses
+     * downloads that would in fact be cheap. */
     private long countNewTiles(String facing, int zoom, int[] r) {
         long n = 0;
         for (int tx = r[0]; tx <= r[1]; tx++) {
             for (int ty = r[2]; ty <= r[3]; ty++) {
-                if (!loadedTileKeys.contains(tileKey(facing, zoom, tx, ty))) {
+                String key = tileKey(facing, zoom, tx, ty);
+                if (!loadedTileKeys.contains(key) && !emptyTileKeys.contains(key)) {
                     n++;
                 }
             }
@@ -1040,10 +1180,31 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * been stored yet (show whatever exists).
      */
     private boolean lodVisible(ImageryFeature f, boolean detailMode, int maxSourceZoom) {
-        if (!detailMode) {
-            return OVERVIEW_FACING.equals(f.getFacing());
+        if (!facingRendersAt(f.getFacing(), detailMode)) {
+            return false;
         }
         return maxSourceZoom < 0 || f.getSourceZoom() >= maxSourceZoom;
+    }
+
+    /**
+     * SSOT for "can this facing appear on screen at this level of detail?" —
+     * shared by the paint filter ({@link #lodVisible}) and the download planner
+     * in {@link #submitDownload}.
+     *
+     * <p>It exists because those two disagreed. Paint has always shown only
+     * {@link #OVERVIEW_FACING} when zoomed out, but the download fetched every
+     * enabled facing regardless — so an overview download pulled all five
+     * facings to render one. That is not a useful pre-fetch either:
+     * {@link #maxStoredSourceZoom} is a single layer-wide monotonic maximum, so
+     * the first detail download anywhere in the session raises it above those
+     * coarse features and {@link #lodVisible} hides them permanently. They stay
+     * in memory, cost merge/dedup time, and never paint again.
+     *
+     * <p>Keeping the rule in one place is the point: if the overview policy
+     * changes, paint and download cannot drift apart again.
+     */
+    private static boolean facingRendersAt(String facing, boolean detailMode) {
+        return detailMode || OVERVIEW_FACING.equals(facing);
     }
 
     /** (Re)start the debounce timer for an auto-download of the given view; a fresh
@@ -1182,6 +1343,29 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return false;
     }
 
+    /**
+     * Logged in, but the token carries no organization.
+     *
+     * <p>This state is silent and indistinguishable from a broken plugin:
+     * {@code PmtilesTileLoader.currentScope()} falls back to the PUBLIC bake when
+     * {@link ViewerAuth#orgId()} is empty, so the user sees only public coverage —
+     * today a single small area — while the menu says they are logged in. The
+     * server agrees, for what it is worth: {@code /tiles/sign} answers
+     * {@code 403 "no organization on token"} for exactly this account.
+     *
+     * <p>Checked rather than assumed because a login can succeed (valid token,
+     * correct tenant) and still land here, e.g. an account not yet attached to an
+     * org. Non-blocking: {@code isLoggedIn} and {@code orgId} are preference reads.
+     */
+    private static boolean isLoggedInWithoutOrg() {
+        ViewerAuth auth = ViewerAuth.getInstance();
+        if (!auth.isLoggedIn()) {
+            return false;
+        }
+        String org = auth.orgId();
+        return org == null || org.isEmpty();
+    }
+
     private void showTooLarge(long tiles) {
         JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
                 "This view is too large to download Maprizon coverage in one go\n" +
@@ -1189,6 +1373,81 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         "Zoom in further and download again — coverage accumulates across downloads.",
                 "Maprizon: zoom in to download",
                 JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    /**
+     * A user-initiated download that added nothing. There are two very different
+     * reasons for that, and the old single message asserted the wrong one.
+     *
+     * <p>It used to say "Already-downloaded tiles are skipped — use Clear
+     * downloaded coverage", unconditionally. When the real cause was "there is no
+     * imagery in this area" that advice was not merely unhelpful, it was a dead
+     * end: clearing coverage and re-downloading reproduces the same empty result
+     * forever. A reporter lost an afternoon to exactly that loop — clearing,
+     * restarting JOSM, and re-logging in, none of which could have worked.
+     *
+     * @param plannedTiles  tiles the planner actually intended to fetch. Zero means
+     *                      every tile was already in a ledger; non-zero means we
+     *                      really did fetch and the archives had nothing here.
+     * @param allKnownEmpty every tile in view is one we previously fetched and
+     *                      found empty. Without this flag the negative tile cache
+     *                      makes a repeat download over empty ground look like
+     *                      "already downloaded", which is both false and the exact
+     *                      misdirection this dialog exists to stop.
+     */
+    private void showNothingAdded(long plannedTiles, boolean allKnownEmpty) {
+        String msg;
+        if (plannedTiles == 0 && !allKnownEmpty) {
+            msg = "Everything in this view has already been downloaded.\n\n"
+                    + "Pan or zoom to new ground, or use \"Clear downloaded coverage\"\n"
+                    + "(layer right-click menu) to fetch it again from scratch.";
+        } else {
+            StringBuilder b = new StringBuilder();
+            // Worded to be true whether we fetched just now or are reporting a
+            // previously-probed empty area — in both cases nothing is wrong.
+            b.append("No Maprizon imagery exists in this view.\n\n")
+             .append("This is not an error: the archives simply have no coverage here.\n")
+             .append("Clearing downloaded coverage will not change this.\n\n");
+            if (isLoggedInWithoutOrg()) {
+                // Logged in, but the token carries no org — so the tile source
+                // silently fell back to the PUBLIC bake and the user is seeing
+                // public coverage only, which looks identical to "the plugin is
+                // broken". Claiming this search covered their organization would be
+                // a lie, and it is the lie that makes this state unfindable.
+                b.append("You are logged in, but your account has no organization on\n")
+                 .append("its token, so only PUBLIC imagery is being loaded — the same\n")
+                 .append("as if you were logged out.\n\n")
+                 .append("Ask an admin to confirm your Maprizon account is attached to\n")
+                 .append("an organization, then log out and back in here.");
+            } else if (ViewerAuth.getInstance().isLoggedIn()) {
+                b.append("You are logged in, so this covers your organization's imagery\n")
+                 .append("as well as public imagery. Try an area you know has been driven.");
+            } else {
+                b.append("You are NOT logged in, so only PUBLIC imagery is visible, and\n")
+                 .append("public coverage is limited to a small area. Use \"Log in to\n")
+                 .append("Maprizon\" in the layer's right-click menu to see your\n")
+                 .append("organization's imagery.");
+            }
+            msg = b.toString();
+        }
+        JOptionPane.showMessageDialog(MainApplication.getMainFrame(), msg,
+                "Maprizon", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    /** Explicit download that planned no tiles because no enabled facing can render
+     * at this zoom. Names the actual cause and the actual fix, rather than leaving
+     * the user with a download that appeared to do nothing. */
+    private void showNothingToDownload(boolean overviewOnly) {
+        String msg = overviewOnly
+                ? "Nothing to download at this zoom.\n\n"
+                        + "Zoomed out, only the " + OVERVIEW_FACING + " facing is drawn, and it is\n"
+                        + "currently hidden (layer right-click menu). Re-enable it, or zoom\n"
+                        + "in far enough to show individual images and every enabled facing\n"
+                        + "will download."
+                : "Nothing to download: all camera facings are hidden.\n\n"
+                        + "Re-enable at least one from the layer's right-click menu.";
+        JOptionPane.showMessageDialog(MainApplication.getMainFrame(), msg,
+                "Maprizon", JOptionPane.INFORMATION_MESSAGE);
     }
 
     public boolean isAutoRefresh() {
@@ -1204,10 +1463,58 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     // ----------------------------------------------------------- selection
 
+    /**
+     * Whether a click on the map should select imagery right now.
+     *
+     * <p>This listener is attached to the whole {@code mapView}, so without a gate
+     * it fires for EVERY click in every editing mode. Two reports of the same
+     * cause: drawing a line near a coverage track selected imagery, and clicking
+     * a road to connect a crossing way selected an image underneath it and moved
+     * the viewpoint out from under the mapper mid-edit. Both are the same handler
+     * stealing a click that belonged to the draw tool.
+     *
+     * <p>Implemented as a WHITELIST of the non-editing modes, deliberately not a
+     * blacklist of editing ones. The bias matters: a click we decline to handle
+     * costs the user one extra click in select mode, whereas a click we steal
+     * corrupts an edit in progress and teleports the view. A blacklist would also
+     * silently fail to cover map modes added by other plugins.
+     *
+     * <p>Zoom mode is in the whitelist and carries real weight — it is not merely
+     * permissive. {@code SelectAction.layerIsSupported} is
+     * {@code layer instanceof OsmDataLayer}, so select mode does not exist in an
+     * imagery-only session; {@code ZoomAction} inherits {@code MapMode}'s default
+     * ("any non-null layer"), so it is the mode available when no OSM data layer
+     * is loaded. Whitelisting select alone would have broken imagery clicking
+     * entirely for imagery-only users — a worse regression than the bug.
+     */
+    private static boolean clickSelectsImagery(MapFrame map) {
+        return map.mapMode == null
+                || map.mapMode == map.mapModeSelect
+                || map.mapMode == map.mapModeSelectLasso
+                || map.mapMode == map.mapModeZoom;
+    }
+
     @Override
     public void mouseClicked(MouseEvent e) {
         MapFrame map = MainApplication.getMap();
         if (map == null || map.mapView == null) {
+            return;
+        }
+        // Plain left-click only. mouseClicked fires for EVERY button, so a
+        // right-click (which opens JOSM's context menu) was also selecting
+        // imagery, and a middle-click likewise. isPopupTrigger is checked as well
+        // because on macOS — where this was reported — ctrl+click is the
+        // right-click gesture and still arrives as BUTTON1.
+        if (e.getButton() != MouseEvent.BUTTON1 || e.isPopupTrigger()) {
+            return;
+        }
+        // A hidden layer must not react to clicks. Nothing is drawn for the user
+        // to have aimed at, so any selection is by definition accidental.
+        if (!isVisible()) {
+            return;
+        }
+        // Don't take a click that belongs to an editing tool — see above.
+        if (!clickSelectsImagery(map)) {
             return;
         }
         lastClickLatLon = map.mapView.getLatLon(e.getX(), e.getY());
@@ -1229,20 +1536,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
         coneBearingDeg = null;
         cone360 = false;
         invalidate();
-        if (e.getClickCount() >= 2) {
-            // Double-click still opens the web viewer (deep link) as a convenience.
-            openInMaprizon();
+        // A click shows the image IN JOSM. Opening the web viewer is a right-click
+        // menu action ("View in Maprizon") only — a double-click no longer launches
+        // a browser.
+        MaprizonImageDialog dialog = MaprizonImageDialog.getInstance();
+        if (dialog != null) {
+            dialog.showForClickedFeature(nearest.feature, nearest.point, this);
         } else {
-            // Single click shows the actual image IN JOSM (Phase 1 image viewer).
-            MaprizonImageDialog dialog = MaprizonImageDialog.getInstance();
-            if (dialog != null) {
-                dialog.showForClickedFeature(nearest.feature, nearest.point, this);
-            } else {
-                // Dialog not registered (no map frame yet) — fall back to a hint.
-                new Notification("<html><b>Maprizon:</b> " + nearest.feature.getFacing()
-                        + "<br><i>double-click to open in Maprizon</i></html>")
-                        .setDuration(Notification.TIME_SHORT).show();
-            }
+            // Dialog not registered (no map frame yet) — fall back to a hint.
+            new Notification("<html><b>Maprizon:</b> " + nearest.feature.getFacing()
+                    + "<br><i>right-click the layer &rarr; View in Maprizon to open in a browser</i></html>")
+                    .setDuration(Notification.TIME_SHORT).show();
         }
     }
 
@@ -1350,31 +1654,37 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
     }
 
+    /**
+     * Layer right-click menu.
+     *
+     * <p><b>Order is a safety property here, not cosmetics.</b> On Windows 11 JOSM
+     * opens this popup with the FIRST item directly under the pointer, so whatever
+     * is first can be triggered by a click that barely moves. Log in/out used to be
+     * first, and a reporter was logging themselves out by accident — which on this
+     * plugin also drops all downloaded coverage (the auth listener clears it) and
+     * needs a full re-authentication to undo.
+     *
+     * <p>So the ordering rule is: the cheapest, most-repeated, most-recoverable
+     * action goes first, and anything that changes session state or destroys work
+     * goes last, behind a separator. Concretely:
+     *
+     * <ol>
+     *   <li>Download coverage — the action people actually come here for, and
+     *       harmless to run twice (already-downloaded tiles are skipped).</li>
+     *   <li>Auto-refresh toggle — instantly reversible.</li>
+     *   <li>Clear downloaded coverage — destructive (throws away accumulated
+     *       downloads), so deliberately NOT adjacent to the pointer.</li>
+     *   <li>Facing show/hide, then View in Maprizon.</li>
+     *   <li>Log in/out — session-changing, so as far from the pointer as
+     *       possible.</li>
+     *   <li>JOSM's own show/hide + delete layer, which convention keeps last.</li>
+     * </ol>
+     *
+     * <p>If an item is ever added at the top, it has to satisfy that first rule.
+     */
     @Override
     public Action[] getMenuEntries() {
         List<Action> actions = new ArrayList<>();
-
-        // Optional login: unlocks private imagery (signed image bytes + private
-        // sequences). Logged-out is the default and everything else works without it.
-        ViewerAuth auth = ViewerAuth.getInstance();
-        if (auth.isLoggedIn()) {
-            String who = auth.email().isEmpty() ? "" : " (" + auth.email() + ")";
-            actions.add(new AbstractAction("Log out of Viewer" + who) {
-                @Override
-                public void actionPerformed(ActionEvent e) {
-                    auth.logout();
-                    invalidate();
-                }
-            });
-        } else {
-            actions.add(new AbstractAction("Log in to Viewer (view private imagery)") {
-                @Override
-                public void actionPerformed(ActionEvent e) {
-                    LoginFlow.start(MaprizonLayer.this::invalidate);
-                }
-            });
-        }
-        actions.add(Layer.SeparatorLayerAction.INSTANCE);
 
         actions.add(new AbstractAction("Download Maprizon coverage in current view") {
             @Override
@@ -1382,17 +1692,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 downloadCurrentView();
             }
         });
-        actions.add(new AbstractAction("Clear downloaded coverage") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                clearCoverage();
-            }
-        });
         actions.add(new AbstractAction(
                 (autoRefresh ? "Disable" : "Enable") + " auto-refresh on pan") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 setAutoRefresh(!autoRefresh);
+            }
+        });
+        actions.add(new AbstractAction("Clear downloaded coverage") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                clearCoverage();
             }
         });
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
@@ -1412,12 +1722,50 @@ public class MaprizonLayer extends Layer implements MouseListener {
             });
         }
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
-        actions.add(new AbstractAction("View in Maprizon") {
+        // Say what the link will actually DO before it opens a browser. The deep
+        // link carries no credentials, so what the recipient sees depends entirely
+        // on the browser's own session: public imagery loads for anyone (which read
+        // as a privacy leak to one reporter), while private imagery silently 404s
+        // in a logged-out browser (which reads as broken). Same button, opposite
+        // confusing outcomes — so name the outcome.
+        actions.add(new AbstractAction(ViewerAuth.getInstance().isLoggedIn()
+                ? "View in Maprizon (opens private imagery — needs a browser login)"
+                : "View in Maprizon (public link)") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 openInMaprizon();
             }
         });
+        actions.add(Layer.SeparatorLayerAction.INSTANCE);
+
+        // Optional login: unlocks private imagery (signed tiles, signed image bytes,
+        // private sequences). Logged-out is the default and everything else works
+        // without it.
+        //
+        // Deliberately near the BOTTOM — see the ordering note on this method. Log
+        // out is the most expensive mis-click in this menu: it drops every
+        // downloaded feature (the auth listener clears coverage, because the
+        // coverage belongs to the other audience) and requires re-authenticating to
+        // get back. It must not sit under the pointer.
+        ViewerAuth auth = ViewerAuth.getInstance();
+        if (auth.isLoggedIn()) {
+            String who = auth.email().isEmpty() ? "" : " (" + auth.email() + ")";
+            actions.add(new AbstractAction("Log out of Maprizon" + who) {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    auth.logout();
+                    invalidate();
+                }
+            });
+        } else {
+            actions.add(new AbstractAction("Log in to Maprizon (view private imagery)") {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    LoginFlow.start(MaprizonLayer.this::invalidate);
+                }
+            });
+        }
+
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
         actions.add(LayerListDialog.getInstance().createShowHideLayerAction());
         actions.add(LayerListDialog.getInstance().createDeleteLayerAction());
@@ -1452,7 +1800,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * still features (the rest of the link is unaffected).
      */
     static String buildDeepLink(ImageryFeature feature, double lat, double lon) {
-        StringBuilder qs = new StringBuilder("https://viewer.kaart.com/?");
+        StringBuilder qs = new StringBuilder("https://app.maprizon.com/?");
         boolean first = true;
         first = appendParam(qs, "sequence_id", feature.getSequenceId(), first);
         first = appendParam(qs, "sequence_index", feature.getSequenceIndex(), first);

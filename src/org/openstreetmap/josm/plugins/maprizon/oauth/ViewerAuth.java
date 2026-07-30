@@ -45,9 +45,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public final class ViewerAuth {
 
-    // --- Auth0 tenant. This MUST match the tenant prod viewer.kaart.com validates
+    // --- Auth0 tenant. This MUST match the tenant prod app.maprizon.com validates
     // against: verified 2026-07-14 by inspecting the live site's login redirect
-    // (viewer.kaart.com/api/auth/login → dev-p6r3cciondp4has2.us.auth0.com,
+    // (app.maprizon.com/api/auth/login → dev-p6r3cciondp4has2.us.auth0.com,
     // audience https://Viewer/api/authorize). NB the server config.py *default* is
     // "viewerdevelopment", but prod overrides it to the tenant below via env. ---
     public static final String DOMAIN = "dev-p6r3cciondp4has2.us.auth0.com";

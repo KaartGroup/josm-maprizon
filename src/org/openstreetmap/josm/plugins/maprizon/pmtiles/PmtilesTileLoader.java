@@ -2,9 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.pmtiles;
 
-import ch.poole.geo.pmtiles.Constants;
-import ch.poole.geo.pmtiles.HttpUrlConnectionChannel;
-import ch.poole.geo.pmtiles.Reader;
 
 import com.wdtinc.mapbox_vector_tile.adapt.jts.MvtReader;
 import com.wdtinc.mapbox_vector_tile.adapt.jts.TagKeyValueMapConverter;
@@ -16,6 +13,8 @@ import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
+import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient;
+import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient.SignedTileUrls;
 import org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth;
 import org.openstreetmap.josm.tools.Logging;
 
@@ -23,8 +22,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URL;
-import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -43,16 +40,19 @@ import java.util.zip.GZIPInputStream;
  * before being wired in here - see this repo's README for the actual output of
  * that run.
  *
- * One {@link Reader} (and the {@link FileChannel} it wraps) is kept open per
- * facing for the lifetime of the loader; call {@link #close()} when the owning
- * layer is destroyed.
+ * One {@link PmtilesArchive} is kept per scope/facing for the lifetime of the
+ * loader; call {@link #close()} when the owning layer is destroyed.
+ *
+ * The bundled {@code ch.poole.geo.pmtiles.Reader} is deliberately NOT used — its
+ * tile-id math overflows from z16 up, making the finest baked tiles unreachable.
+ * See {@link PmtilesArchive} and {@link TileId#zxyToIndex(int, long, long)}.
  */
 public final class PmtilesTileLoader implements AutoCloseable {
 
     /** Keyed by {@code scope/facing} (not just facing) so the public and an org's
      * private bake are separate readers — logging in/out re-points the tile source
      * to a different, correct reader without any stale-cache surgery. */
-    private final Map<String, Reader> readersByFacing = new ConcurrentHashMap<>();
+    private final Map<String, PmtilesArchive> archivesByFacing = new ConcurrentHashMap<>();
 
     /**
      * Tileset scope for the current auth state: the logged-in user's Auth0 org id
@@ -71,32 +71,152 @@ public final class PmtilesTileLoader implements AutoCloseable {
         return FacingStyle.PUBLIC_SCOPE;
     }
 
-    private Reader readerFor(String facing) throws IOException {
+    /**
+     * Re-sign this long BEFORE the signature actually expires, so a range read
+     * already in flight cannot land on a dead URL. Mirrors the web client's
+     * {@code SIGN_REFRESH_BUFFER_MS} in {@code useMapTileUrls.js}.
+     *
+     * <p>This is the only signing-related duration defined on the client, and
+     * deliberately so: it is a client POLICY (how early to refresh), not a copy
+     * of the server's TTL. The expiry itself always comes from the server's
+     * {@code expiresAt}.
+     */
+    private static final long SIGN_REFRESH_BUFFER_MS = 5L * 60L * 1000L;
+
+    /** Last successful batch of presigned org-tile URLs, or null when anonymous
+     * / not yet signed / last attempt failed. Guarded by {@code this}. */
+    private SignedTileUrls signed;
+    /** Scope the cached {@link #signed} batch belongs to, so switching orgs (or
+     * logging out) can never serve another scope's signatures. Guarded by {@code this}. */
+    private String signedScope;
+
+    /**
+     * Resolve the archive URL for a facing under the current scope.
+     *
+     * <p>Public scope is unsigned: {@code public_imagery-{facing}.pmtiles} is
+     * public-read and fetched directly, exactly as the web client does it.
+     *
+     * <p>Org scope MUST be presigned — those objects are private in Spaces and the
+     * range reads carry no {@code Authorization} header, so a query-string
+     * signature is the only mechanism. Returns null if signing is unavailable,
+     * which the caller turns into a clear IOException rather than a silent 403.
+     *
+     * <p>Caller must hold the monitor on {@code this}.
+     */
+    private String archiveUrlFor(String facing, String scope, boolean forceResign) {
+        if (FacingStyle.PUBLIC_SCOPE.equals(scope)) {
+            return FacingStyle.pmtilesUrlFor(facing, scope);
+        }
+        long nowMs = System.currentTimeMillis();
+        boolean stale = signed == null
+                || !scope.equals(signedScope)
+                // expiresAt is epoch SECONDS (server-side); convert before comparing.
+                || (signed.expiresAtEpochSeconds * 1000L) - nowMs <= SIGN_REFRESH_BUFFER_MS;
+        if (forceResign || stale) {
+            SignedTileUrls fresh = ViewerApiClient.signedTileUrls();
+            if (fresh != null) {
+                signed = fresh;
+                signedScope = scope;
+                // Signatures changed, so every open archive for this scope is
+                // pinned to a URL that is about to stop working. An archive holds
+                // its URL for the life of the object, so invalidation means
+                // eviction; they are rebuilt lazily against the new URLs.
+                evictArchivesForScope(scope);
+            } else if (forceResign || signed == null || !scope.equals(signedScope)) {
+                // Nothing usable: don't serve another scope's or an expired batch.
+                return null;
+            }
+        }
+        return signed == null ? null : signed.urls.get(facing);
+    }
+
+    /** Drop every cached archive belonging to {@code scope}. An archive pins its
+     * URL, so a re-signed scope must be rebuilt rather than mutated. Nothing to
+     * close: reads are per-request connections, not a long-lived channel. Caller
+     * must hold the monitor. */
+    private void evictArchivesForScope(String scope) {
+        String prefix = scope + "/";
+        archivesByFacing.keySet().removeIf(k -> k.startsWith(prefix));
+    }
+
+    private PmtilesArchive archiveFor(String facing) throws IOException {
+        return archiveFor(facing, false);
+    }
+
+    /**
+     * @param forceResign re-sign before building the reader even if the cached
+     *                    batch still looks current — used after a 403, which is
+     *                    how a revoked/rotated signature announces itself.
+     */
+    private PmtilesArchive archiveFor(String facing, boolean forceResign) throws IOException {
         String scope = currentScope();
         String key = scope + "/" + facing;
-        Reader existing = readersByFacing.get(key);
-        if (existing != null) {
-            return existing;
-        }
-        synchronized (this) {
-            existing = readersByFacing.get(key);
+        if (!forceResign) {
+            PmtilesArchive existing = archivesByFacing.get(key);
             if (existing != null) {
                 return existing;
             }
-            URL url = new URL(FacingStyle.pmtilesUrlFor(facing, scope));
-            FileChannel channel = new HttpUrlConnectionChannel(url);
-            Reader reader = new Reader(channel);
-            readersByFacing.put(key, reader);
-            return reader;
+        }
+        synchronized (this) {
+            if (!forceResign) {
+                PmtilesArchive existing = archivesByFacing.get(key);
+                if (existing != null) {
+                    return existing;
+                }
+            }
+            String urlStr = archiveUrlFor(facing, scope, forceResign);
+            if (urlStr == null) {
+                // Be explicit. Previously this path fetched an unsigned private
+                // URL and died on an opaque "HTTP response code: 403", which is
+                // what users saw as "download is just broken".
+                throw new IOException("no signed URL available for " + scope + "/" + facing
+                        + " (private tiles need a valid login; see Maprizon > Log in)");
+            }
+            // Re-check AFTER signing: archiveUrlFor may have evicted this key.
+            PmtilesArchive existing = archivesByFacing.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            PmtilesArchive archive = new PmtilesArchive(urlStr);
+            // open() eagerly reads header + directory, so a bad/expired signature
+            // throws HERE — before the put, so a failed archive never poisons the
+            // cache.
+            archive.open();
+            archivesByFacing.put(key, archive);
+            return archive;
         }
     }
 
-    public byte getMinZoom(String facing) throws IOException {
-        return readerFor(facing).getMinZoom();
+    public int getMinZoom(String facing) throws IOException {
+        try {
+            return archiveFor(facing).minZoom();
+        } catch (PmtilesArchive.PmtilesForbiddenException e) {
+            return archiveFor(facing, true).minZoom();
+        }
     }
 
-    public byte getMaxZoom(String facing) throws IOException {
-        return readerFor(facing).getMaxZoom();
+    public int getMaxZoom(String facing) throws IOException {
+        try {
+            return archiveFor(facing).maxZoom();
+        } catch (PmtilesArchive.PmtilesForbiddenException e) {
+            return archiveFor(facing, true).maxZoom();
+        }
+    }
+
+    /**
+     * Does this facing's archive hold a tile at {@code (z,x,y)}? Local lookup in
+     * the decoded directory — NO network request.
+     *
+     * <p>Exposed because it changes what callers can do: the fetch path no longer
+     * has to request a tile to find out whether it exists, which is what the
+     * ancestor walk and the empty-tile ledger were compensating for.
+     */
+    public boolean hasTile(String facing, int z, int x, int y) throws IOException {
+        try {
+            return archiveFor(facing).hasTile(z, x, y);
+        } catch (PmtilesArchive.PmtilesForbiddenException e) {
+            return archiveFor(facing, true).hasTile(z, x, y);
+        }
     }
 
     /**
@@ -114,12 +234,35 @@ public final class PmtilesTileLoader implements AutoCloseable {
      * exist in the archive at this z/x/y — as opposed to an empty list for a
      * tile that IS present but carries no "imagery" features. This lets callers
      * distinguish "nothing baked here, try the parent tile" (overzoom) from
-     * "tile present, genuinely empty area", which matters because the archives
-     * advertise maxZoom=16 in their header but only bake tiles down to z15.
+     * "tile present, genuinely empty area".
+     *
+     * <p>Historical note, because a stale comment here sent people the wrong way:
+     * this used to say the archives "advertise maxZoom=16 but only bake tiles down
+     * to z15". They DO bake z16 — ~700 tiles per facing. They were unreachable
+     * because the bundled reader's tile-id math overflowed at z16. See
+     * {@link TileId#zxyToIndex(int, long, long)}.
      */
     public List<ImageryFeature> loadTileOrNull(String facing, int z, int x, int y) throws IOException {
-        Reader reader = readerFor(facing);
-        byte[] raw = reader.getTile(z, x, y);
+        // `archive` is needed further down for the tile-compression byte, so it
+        // must outlive the retry — and it may be a DIFFERENT archive after
+        // re-signing.
+        PmtilesArchive archive;
+        byte[] raw;
+        try {
+            // Both calls are inside the try on purpose: a dead signature can
+            // surface either from open() (it eagerly reads header + directory) or
+            // from getTile().
+            archive = archiveFor(facing);
+            raw = archive.getTile(z, x, y);
+        } catch (PmtilesArchive.PmtilesForbiddenException e) {
+            // The presignature died mid-session (they last 24h and a JOSM session
+            // can outlive that, especially across a laptop sleep). Re-sign once and
+            // retry. This is now a real HTTP status rather than a substring match
+            // on an exception message.
+            Logging.info("Maprizon: tile signature expired for " + facing + ", re-signing");
+            archive = archiveFor(facing, true);
+            raw = archive.getTile(z, x, y);
+        }
         if (raw == null) {
             return null;
         }
@@ -127,7 +270,7 @@ public final class PmtilesTileLoader implements AutoCloseable {
         // Decompress if the header says gzip OR the bytes carry the gzip magic
         // (0x1f 0x8b) — never let a mis-declared compression drop a whole tile.
         byte[] mvtBytes = raw;
-        boolean gzip = reader.getTileCompression() == Constants.COMPRESSION_GZIP
+        boolean gzip = archive.header().tileCompression == PmtilesDirectory.COMPRESSION_GZIP
                 || (raw.length >= 2 && (raw[0] & 0xFF) == 0x1f && (raw[1] & 0xFF) == 0x8b);
         if (gzip) {
             mvtBytes = gunzip(raw);
@@ -193,7 +336,7 @@ public final class PmtilesTileLoader implements AutoCloseable {
         return out;
     }
 
-    private static byte[] gunzip(byte[] data) throws IOException {
+    static byte[] gunzip(byte[] data) throws IOException {
         try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(data));
              ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
             byte[] buf = new byte[8192];
@@ -207,13 +350,8 @@ public final class PmtilesTileLoader implements AutoCloseable {
 
     @Override
     public void close() {
-        for (Map.Entry<String, Reader> e : readersByFacing.entrySet()) {
-            try {
-                e.getValue().close();
-            } catch (IOException ex) {
-                Logging.warn("Maprizon: failed to close PMTiles reader for facing " + e.getKey() + ": " + ex.getMessage());
-            }
-        }
-        readersByFacing.clear();
+        // Nothing to close: archives hold no long-lived channel — each range read
+        // opens and disconnects its own connection. Dropping the map is enough.
+        archivesByFacing.clear();
     }
 }

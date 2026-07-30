@@ -8,7 +8,7 @@
 
 ## Vision
 
-A bidirectional bridge between Viewer.kaart.com and JOSM, consisting of:
+A bidirectional bridge between app.maprizon.com and JOSM, consisting of:
 
 1. **Viewer-side integration** (JavaScript) — OSM data import with filtering, JOSM remote control, real-time sync
 2. **JOSM plugin** (Java) — custom remote control commands, event listeners that push state back to Viewer, Viewer imagery layer inside JOSM
