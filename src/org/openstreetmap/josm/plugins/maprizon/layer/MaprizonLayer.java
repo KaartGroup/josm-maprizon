@@ -1600,31 +1600,37 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
     }
 
+    /**
+     * Layer right-click menu.
+     *
+     * <p><b>Order is a safety property here, not cosmetics.</b> On Windows 11 JOSM
+     * opens this popup with the FIRST item directly under the pointer, so whatever
+     * is first can be triggered by a click that barely moves. Log in/out used to be
+     * first, and a reporter was logging themselves out by accident — which on this
+     * plugin also drops all downloaded coverage (the auth listener clears it) and
+     * needs a full re-authentication to undo.
+     *
+     * <p>So the ordering rule is: the cheapest, most-repeated, most-recoverable
+     * action goes first, and anything that changes session state or destroys work
+     * goes last, behind a separator. Concretely:
+     *
+     * <ol>
+     *   <li>Download coverage — the action people actually come here for, and
+     *       harmless to run twice (already-downloaded tiles are skipped).</li>
+     *   <li>Auto-refresh toggle — instantly reversible.</li>
+     *   <li>Clear downloaded coverage — destructive (throws away accumulated
+     *       downloads), so deliberately NOT adjacent to the pointer.</li>
+     *   <li>Facing show/hide, then View in Maprizon.</li>
+     *   <li>Log in/out — session-changing, so as far from the pointer as
+     *       possible.</li>
+     *   <li>JOSM's own show/hide + delete layer, which convention keeps last.</li>
+     * </ol>
+     *
+     * <p>If an item is ever added at the top, it has to satisfy that first rule.
+     */
     @Override
     public Action[] getMenuEntries() {
         List<Action> actions = new ArrayList<>();
-
-        // Optional login: unlocks private imagery (signed image bytes + private
-        // sequences). Logged-out is the default and everything else works without it.
-        ViewerAuth auth = ViewerAuth.getInstance();
-        if (auth.isLoggedIn()) {
-            String who = auth.email().isEmpty() ? "" : " (" + auth.email() + ")";
-            actions.add(new AbstractAction("Log out of Maprizon" + who) {
-                @Override
-                public void actionPerformed(ActionEvent e) {
-                    auth.logout();
-                    invalidate();
-                }
-            });
-        } else {
-            actions.add(new AbstractAction("Log in to Maprizon (view private imagery)") {
-                @Override
-                public void actionPerformed(ActionEvent e) {
-                    LoginFlow.start(MaprizonLayer.this::invalidate);
-                }
-            });
-        }
-        actions.add(Layer.SeparatorLayerAction.INSTANCE);
 
         actions.add(new AbstractAction("Download Maprizon coverage in current view") {
             @Override
@@ -1632,17 +1638,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 downloadCurrentView();
             }
         });
-        actions.add(new AbstractAction("Clear downloaded coverage") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                clearCoverage();
-            }
-        });
         actions.add(new AbstractAction(
                 (autoRefresh ? "Disable" : "Enable") + " auto-refresh on pan") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 setAutoRefresh(!autoRefresh);
+            }
+        });
+        actions.add(new AbstractAction("Clear downloaded coverage") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                clearCoverage();
             }
         });
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
@@ -1676,6 +1682,36 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 openInMaprizon();
             }
         });
+        actions.add(Layer.SeparatorLayerAction.INSTANCE);
+
+        // Optional login: unlocks private imagery (signed tiles, signed image bytes,
+        // private sequences). Logged-out is the default and everything else works
+        // without it.
+        //
+        // Deliberately near the BOTTOM — see the ordering note on this method. Log
+        // out is the most expensive mis-click in this menu: it drops every
+        // downloaded feature (the auth listener clears coverage, because the
+        // coverage belongs to the other audience) and requires re-authenticating to
+        // get back. It must not sit under the pointer.
+        ViewerAuth auth = ViewerAuth.getInstance();
+        if (auth.isLoggedIn()) {
+            String who = auth.email().isEmpty() ? "" : " (" + auth.email() + ")";
+            actions.add(new AbstractAction("Log out of Maprizon" + who) {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    auth.logout();
+                    invalidate();
+                }
+            });
+        } else {
+            actions.add(new AbstractAction("Log in to Maprizon (view private imagery)") {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    LoginFlow.start(MaprizonLayer.this::invalidate);
+                }
+            });
+        }
+
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
         actions.add(LayerListDialog.getInstance().createShowHideLayerAction());
         actions.add(LayerListDialog.getInstance().createDeleteLayerAction());
