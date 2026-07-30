@@ -289,11 +289,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private static String audienceLayerName() {
         ViewerAuth auth = ViewerAuth.getInstance();
         if (auth.isLoggedIn()) {
-            String org = auth.orgId();
+            // Logged in with no org loads the PUBLIC bake, so naming the user here
+            // would imply private coverage that is not present. Say what is
+            // actually loaded, and why.
+            if (isLoggedInWithoutOrg()) {
+                return "Maprizon Coverage — public only (no org on your account)";
+            }
             String who = auth.email();
             if (!who.isEmpty()) {
                 return "Maprizon Coverage — " + who;
             }
+            String org = auth.orgId();
             if (org != null && !org.isEmpty()) {
                 return "Maprizon Coverage — " + org;
             }
@@ -306,6 +312,18 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private void onAuthChanged() {
         clearCoverage();
         setName(audienceLayerName());
+        // Tell the user AT LOGIN if the login bought them nothing, instead of
+        // letting them discover it as "no coverage anywhere" a few downloads later.
+        // A reporter hit exactly that: logged in, added the layer, and saw imagery
+        // only around Cebu — the public bake — with nothing indicating why.
+        if (isLoggedInWithoutOrg()) {
+            new Notification("<html><b>Maprizon: logged in, but no organization</b><br>"
+                    + "Your token carries no organization, so only PUBLIC imagery will<br>"
+                    + "load. Ask an admin to attach your account to an organization.</html>")
+                    .setIcon(JOptionPane.WARNING_MESSAGE)
+                    .setDuration(Notification.TIME_LONG)
+                    .show();
+        }
     }
 
     @Override
@@ -708,9 +726,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 boolean detailMode = rawScreenZoom(view, widthPx) >= USABLE_ZOOM;
                 diagReset("==== MAPRIZON DOWNLOAD " + BUILD_TAG + " ====");
                 diag(String.format(Locale.ROOT,
-                        "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b detail=%b enabled=%s",
+                        "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b detail=%b loggedIn=%b orgOnToken=%b enabled=%s",
                         view.getMinLon(), view.getMaxLon(), view.getMinLat(), view.getMaxLat(),
-                        widthPx, zoom, archiveMinZoom(), archiveMaxZoom(), enforceBudget, detailMode, enabledFacings));
+                        widthPx, zoom, archiveMinZoom(), archiveMaxZoom(), enforceBudget, detailMode,
+                        ViewerAuth.getInstance().isLoggedIn(), !isLoggedInWithoutOrg(),
+                        enabledFacings));
                 Map<String, int[]> rangesByFacing = new LinkedHashMap<>();
                 long totalNewTiles = 0;
                 // Tracked alongside newTiles so an empty download can tell "you
@@ -1323,6 +1343,29 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return false;
     }
 
+    /**
+     * Logged in, but the token carries no organization.
+     *
+     * <p>This state is silent and indistinguishable from a broken plugin:
+     * {@code PmtilesTileLoader.currentScope()} falls back to the PUBLIC bake when
+     * {@link ViewerAuth#orgId()} is empty, so the user sees only public coverage —
+     * today a single small area — while the menu says they are logged in. The
+     * server agrees, for what it is worth: {@code /tiles/sign} answers
+     * {@code 403 "no organization on token"} for exactly this account.
+     *
+     * <p>Checked rather than assumed because a login can succeed (valid token,
+     * correct tenant) and still land here, e.g. an account not yet attached to an
+     * org. Non-blocking: {@code isLoggedIn} and {@code orgId} are preference reads.
+     */
+    private static boolean isLoggedInWithoutOrg() {
+        ViewerAuth auth = ViewerAuth.getInstance();
+        if (!auth.isLoggedIn()) {
+            return false;
+        }
+        String org = auth.orgId();
+        return org == null || org.isEmpty();
+    }
+
     private void showTooLarge(long tiles) {
         JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
                 "This view is too large to download Maprizon coverage in one go\n" +
@@ -1365,7 +1408,18 @@ public class MaprizonLayer extends Layer implements MouseListener {
             b.append("No Maprizon imagery exists in this view.\n\n")
              .append("This is not an error: the archives simply have no coverage here.\n")
              .append("Clearing downloaded coverage will not change this.\n\n");
-            if (ViewerAuth.getInstance().isLoggedIn()) {
+            if (isLoggedInWithoutOrg()) {
+                // Logged in, but the token carries no org — so the tile source
+                // silently fell back to the PUBLIC bake and the user is seeing
+                // public coverage only, which looks identical to "the plugin is
+                // broken". Claiming this search covered their organization would be
+                // a lie, and it is the lie that makes this state unfindable.
+                b.append("You are logged in, but your account has no organization on\n")
+                 .append("its token, so only PUBLIC imagery is being loaded — the same\n")
+                 .append("as if you were logged out.\n\n")
+                 .append("Ask an admin to confirm your Maprizon account is attached to\n")
+                 .append("an organization, then log out and back in here.");
+            } else if (ViewerAuth.getInstance().isLoggedIn()) {
                 b.append("You are logged in, so this covers your organization's imagery\n")
                  .append("as well as public imagery. Try an area you know has been driven.");
             } else {
