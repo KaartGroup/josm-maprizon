@@ -177,7 +177,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "1.0.4";
+    private static final String BUILD_TAG = "1.0.5";
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -1616,11 +1616,24 @@ public class MaprizonLayer extends Layer implements MouseListener {
      */
     private void showOrgScopeUnavailable(String scope, String reason) {
         Logging.warn("Maprizon: private tileset " + scope + " unavailable: " + reason);
+        // When the token is missing the claim the SERVER scopes by, say so
+        // outright rather than leaving a bare 403 to be interpreted. This plugin
+        // accepts a custom org claim that NO part of the backend reads, so it can
+        // be certain it is org-scoped while the server is equally certain it is
+        // not — and logging out and back in cannot change that.
+        String claims = ViewerAuth.getInstance().orgClaimSummary();
+        String hint = claims.contains("org_id=ABSENT")
+                ? "Your access token carries NO Auth0 <tt>org_id</tt> claim — the plugin<br>"
+                        + "read your org from a custom claim the backend does not use. The<br>"
+                        + "server scopes tiles by <tt>org_id</tt>, so it cannot serve them.<br>"
+                        + "The plugin's Auth0 application needs Organization login enabled.<br>"
+                : "Try logging out and back in; if it persists the org tileset may<br>"
+                        + "not be baked yet.<br>";
         new Notification("<html><b>Maprizon: your organization's tiles could not be loaded</b><br>"
                 + "Showing PUBLIC imagery only. Scope: <tt>" + scope + "</tt><br>"
                 + (reason == null ? "" : "Reason: " + reason + "<br>")
-                + "Try logging out and back in; if it persists the org tileset may<br>"
-                + "not be baked yet.</html>")
+                + hint
+                + "<i>" + claims + "</i></html>")
                 .setIcon(JOptionPane.WARNING_MESSAGE)
                 .setDuration(Notification.TIME_LONG)
                 .show();

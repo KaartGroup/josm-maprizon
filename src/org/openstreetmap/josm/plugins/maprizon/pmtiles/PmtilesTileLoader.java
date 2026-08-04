@@ -182,11 +182,14 @@ public final class PmtilesTileLoader implements AutoCloseable {
             }
             String urlStr = archiveUrlFor(facing, scope, forceResign);
             if (urlStr == null) {
-                // Be explicit. Previously this path fetched an unsigned private
-                // URL and died on an opaque "HTTP response code: 403", which is
-                // what users saw as "download is just broken".
-                throw new IOException("no signed URL available for " + scope + "/" + facing
-                        + " (private tiles need a valid login; see Maprizon > Log in)");
+                // Be explicit, and pass on the SERVER's reason. "No signed URL"
+                // alone was true but useless: an expired login, an org missing
+                // from the token, and a 500 in the signer all read identically,
+                // and they need completely different fixes.
+                String why = ViewerApiClient.lastSignFailure();
+                throw new IOException("no signed URL for " + scope + "/" + facing
+                        + (why == null ? " (private tiles need a valid login; see Maprizon > Log in)"
+                                       : " — " + why));
             }
             // Re-check AFTER signing: archiveUrlFor may have evicted this key.
             PmtilesArchive existing = archivesByFacing.get(key);
