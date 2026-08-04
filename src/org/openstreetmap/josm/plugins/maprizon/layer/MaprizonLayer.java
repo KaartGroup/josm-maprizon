@@ -122,26 +122,24 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private static final double FINE_ENOUGH_FRACTION = 0.6;
 
     /**
-     * Display slippy zoom at/above which the layer is in "detail" mode: every
-     * enabled facing renders, but ONLY at its finest fetched resolution, and
-     * auto-download is allowed. Below it ("overview", zoomed out) a single facing
-     * renders and auto-download is suppressed.
+     * Display slippy zoom at/above which AUTO-REFRESH (opt-in live mode) is
+     * allowed to fire, so a zoomed-out pan never triggers a mass load. It no
+     * longer decides anything about which facings exist.
      *
-     * <p><b>Was 16, which is why the plugin appeared to load only 360.</b> The gate
-     * gets applied to the DOWNLOAD planner as well as to paint (see
-     * {@link #facingRendersAt}), so below it nothing but {@link #OVERVIEW_FACING}
-     * is even fetched. z16 is deep — a JOSM window at z16 spans a couple of city
-     * blocks — so ordinary work at z14/z15 sat in "overview" and saw one facing,
-     * with no indication that four others existed. z14 is roughly where a sequence
-     * stops being a single stroke and the facings become worth telling apart, and
-     * the tile cost there is small (the public bake holds ~120 tiles at z14 for the
-     * whole dataset, vs ~766 at z16). Tunable.
+     * <p><b>It used to, and that is the whole of the "plugin only loads 360"
+     * report.</b> Below this zoom a single facing — 360 — was drawn AND, worse,
+     * was the only one the download planner requested; front, left and right were
+     * never fetched, with nothing on screen saying so. Raising the threshold from
+     * 16 to 14 only moved the cliff. The rule is gone instead.
+     *
+     * <p>It was justified as bandwidth control, and it never was any: the request
+     * zoom is SCREEN-MATCHED (see {@link #screenZoom}), so a view costs about
+     * (screenW/256)·(screenH/256) tiles per facing whatever its geographic scale
+     * — a zoomed-out download is not a bigger download. {@link
+     * #MAX_TILES_PER_DOWNLOAD} already bounds the pathological case, and it says
+     * so out loud instead of quietly dropping four fifths of the data.
      */
     private static final int USABLE_ZOOM = 14;
-
-    /** The one facing shown in overview (zoomed-out) mode — 360 is the most
-     * representative of overall coverage. */
-    private static final String OVERVIEW_FACING = FacingStyle.FACING_360;
 
     /** Debounce (ms) after the view settles before an auto-download fires; further
      * movement within the window resets it (mirrors JOSM's ContinuousDownload). */
@@ -179,7 +177,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "1.0.3";
+    private static final String BUILD_TAG = "1.0.4";
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -431,7 +429,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
             }
             float offsetPx = facingOffsetPx(entry.getKey());
             for (ImageryFeature feature : entry.getValue()) {
-                if (!lodVisible(feature, detailMode)) {
+                if (!lodVisible(feature)) {
                     continue;
                 }
                 paintCasing(g, mv, feature, offsetPx);
@@ -444,7 +442,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
             Color color = FacingStyle.colorFor(entry.getKey());
             float offsetPx = facingOffsetPx(entry.getKey());
             for (ImageryFeature feature : entry.getValue()) {
-                if (!lodVisible(feature, detailMode)) {
+                if (!lodVisible(feature)) {
                     continue;
                 }
                 paintColor(g, mv, feature, color, offsetPx);
@@ -819,14 +817,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         diag("plan facing=" + facing + " SKIPPED (disabled)");
                         continue;
                     }
-                    // Don't fetch what cannot be drawn at this zoom. Zoomed out that
-                    // is four of the five facings — the single biggest source of
-                    // "downloads far more than the view" on an overview download.
-                    if (!facingRendersAt(facing, detailMode)) {
-                        diag("plan facing=" + facing + " SKIPPED (overview: only "
-                                + OVERVIEW_FACING + " renders)");
-                        continue;
-                    }
                     int[] r = tileRange(view, zoom);
                     rangesByFacing.put(facing, r);
                     long tiles = (long) (r[1] - r[0] + 1) * (r[3] - r[2] + 1);
@@ -851,8 +841,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 if (rangesByFacing.isEmpty()) {
                     diag("plan EMPTY: no renderable facing at this zoom");
                     if (userInitiated) {
-                        final boolean overviewOnly = !detailMode;
-                        SwingUtilities.invokeLater(() -> showNothingToDownload(overviewOnly));
+                        SwingUtilities.invokeLater(this::showNothingToDownload);
                     }
                     return;
                 }
@@ -887,6 +876,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // anyway — this just makes the in-flight run internally consistent.)
                 final List<String> scopes = PmtilesTileLoader.currentScopes();
                 diag("scopes=" + scopes);
+                // Per-scope outcome, so a scope that produced NOTHING because it
+                // could never be opened is reported as the failure it is instead
+                // of looking like "your organization has no imagery here". Keyed
+                // by scope; counted across every facing and tile in this run.
+                Map<String, int[]> scopeStats = new LinkedHashMap<>(); // scope -> {ok, failed}
+                for (String s : scopes) {
+                    scopeStats.put(s, new int[2]);
+                }
+                String scopeFailureMessage = null;
                 for (Map.Entry<String, int[]> e : rangesByFacing.entrySet()) {
                     String facing = e.getKey();
                     int[] r = e.getValue();
@@ -915,8 +913,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
                                 try {
                                     tileFeats.addAll(loadWithOverzoom(scope, facing, zoom, tx, ty, ancestorCache));
                                     anyScopeFetched = true;
+                                    scopeStats.get(scope)[0]++;
                                 } catch (IOException ioe) {
                                     lastFailure = ioe;
+                                    scopeStats.get(scope)[1]++;
+                                    if (scopeFailureMessage == null) {
+                                        scopeFailureMessage = ioe.getMessage();
+                                    }
                                     Logging.warn("Maprizon: tile fetch failed " + scope + "/" + key
                                             + ": " + ioe.getMessage());
                                 }
@@ -963,7 +966,28 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // "Every tile in view is one we already probed and found empty" —
                 // i.e. genuinely no imagery here, not a stale cache.
                 final boolean allKnownEmpty = totalTiles > 0 && knownEmptyTiles == totalTiles;
+                // A PRIVATE scope that was attempted and never once opened. Not a
+                // detail: it means everything on screen is public imagery while the
+                // menu says you are logged in, which is precisely the state that
+                // gets reported as "the plugin refuses to load private data".
+                // Silence here is what made it undiagnosable — the reason only ever
+                // went to a debug log that is off by default.
+                String deadScope = null;
+                for (Map.Entry<String, int[]> st : scopeStats.entrySet()) {
+                    if (!FacingStyle.PUBLIC_SCOPE.equals(st.getKey())
+                            && st.getValue()[0] == 0 && st.getValue()[1] > 0) {
+                        deadScope = st.getKey();
+                    }
+                }
+                final String failedScope = deadScope;
+                final String failedReason = scopeFailureMessage;
+                diag("scope outcomes " + scopeStats.entrySet().stream()
+                        .map(en -> en.getKey() + "{ok=" + en.getValue()[0] + ",failed=" + en.getValue()[1] + "}")
+                        .collect(java.util.stream.Collectors.joining(" ")));
                 SwingUtilities.invokeLater(() -> {
+                    if (failedScope != null) {
+                        showOrgScopeUnavailable(failedScope, failedReason);
+                    }
                     // Merge dedups (a line spans many tiles); report what was ADDED
                     // per facing, so a download states exactly what it contributed.
                     Map<String, Integer> addedByFacing = merge(fetched);
@@ -1297,17 +1321,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
     /**
-     * Level-of-detail paint filter. Overview (zoomed out, {@code !detailMode}): only
-     * the single {@link #OVERVIEW_FACING} renders, to cut clutter. Detail (zoomed
-     * in): every enabled facing renders, except where a FINER request has already
+     * Level-of-detail paint filter. Every enabled facing renders at every zoom,
+     * except where a FINER request has already
      * been fetched over that feature's own ground ({@link #finerDataFetchedOver}),
      * so coarse overzoom geometry stops drawing beneath its full-resolution
      * replacement — and nothing else is suppressed.
      */
-    private boolean lodVisible(ImageryFeature f, boolean detailMode) {
-        if (!facingRendersAt(f.getFacing(), detailMode)) {
-            return false;
-        }
+    private boolean lodVisible(ImageryFeature f) {
         return !finerDataFetchedOver(f);
     }
 
@@ -1353,26 +1373,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
             }
         }
         return false;
-    }
-
-    /**
-     * SSOT for "can this facing appear on screen at this level of detail?" —
-     * shared by the paint filter ({@link #lodVisible}) and the download planner
-     * in {@link #submitDownload}.
-     *
-     * <p>It exists because those two disagreed. Paint has always shown only
-     * {@link #OVERVIEW_FACING} when zoomed out, but the download fetched every
-     * enabled facing regardless — so an overview download pulled all five
-     * facings to render one. It is a poor pre-fetch too: a later detail download
-     * over the same ground supersedes those coarse features (see
-     * {@link #finerDataFetchedOver}), after which they stay in memory, cost
-     * merge/dedup time, and never paint again.
-     *
-     * <p>Keeping the rule in one place is the point: if the overview policy
-     * changes, paint and download cannot drift apart again.
-     */
-    private static boolean facingRendersAt(String facing, boolean detailMode) {
-        return detailMode || OVERVIEW_FACING.equals(facing);
     }
 
     /** (Re)start the debounce timer for an auto-download of the given view; a fresh
@@ -1602,19 +1602,37 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 "Maprizon", JOptionPane.INFORMATION_MESSAGE);
     }
 
-    /** Explicit download that planned no tiles because no enabled facing can render
-     * at this zoom. Names the actual cause and the actual fix, rather than leaving
-     * the user with a download that appeared to do nothing. */
-    private void showNothingToDownload(boolean overviewOnly) {
-        String msg = overviewOnly
-                ? "Nothing to download at this zoom.\n\n"
-                        + "Zoomed out, only the " + OVERVIEW_FACING + " facing is drawn, and it is\n"
-                        + "currently hidden (layer right-click menu). Re-enable it, or zoom\n"
-                        + "in far enough to show individual images and every enabled facing\n"
-                        + "will download."
-                : "Nothing to download: all camera facings are hidden.\n\n"
-                        + "Re-enable at least one from the layer's right-click menu.";
-        JOptionPane.showMessageDialog(MainApplication.getMainFrame(), msg,
+    /**
+     * The logged-in user's own organization tileset could not be opened ONCE in a
+     * whole download, so everything that did arrive is public imagery.
+     *
+     * <p>Shown rather than logged, and shown even for a background refresh, because
+     * the failure is invisible by construction: the layer falls back to the public
+     * bake on purpose (so the plugin keeps working), the menu still says "Log out",
+     * and the map fills with public coverage. The user's conclusion is "it refuses
+     * to load private data", with nothing to act on. The likely causes are all
+     * actionable — an expired signature, {@code /tiles/sign} refusing the token, or
+     * an org whose bake does not exist yet — so name the scope and the error.
+     */
+    private void showOrgScopeUnavailable(String scope, String reason) {
+        Logging.warn("Maprizon: private tileset " + scope + " unavailable: " + reason);
+        new Notification("<html><b>Maprizon: your organization's tiles could not be loaded</b><br>"
+                + "Showing PUBLIC imagery only. Scope: <tt>" + scope + "</tt><br>"
+                + (reason == null ? "" : "Reason: " + reason + "<br>")
+                + "Try logging out and back in; if it persists the org tileset may<br>"
+                + "not be baked yet.</html>")
+                .setIcon(JOptionPane.WARNING_MESSAGE)
+                .setDuration(Notification.TIME_LONG)
+                .show();
+    }
+
+    /** Explicit download that planned no tiles because every facing is hidden.
+     * Names the actual cause and the actual fix, rather than leaving the user
+     * with a download that appeared to do nothing. */
+    private void showNothingToDownload() {
+        JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
+                "Nothing to download: all camera facings are hidden.\n\n"
+                        + "Re-enable at least one from the layer's right-click menu.",
                 "Maprizon", JOptionPane.INFORMATION_MESSAGE);
     }
 
