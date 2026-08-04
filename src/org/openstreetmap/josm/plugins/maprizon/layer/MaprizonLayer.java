@@ -170,7 +170,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "1.0.1";
+    private static final String BUILD_TAG = "1.0.2";
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -266,9 +266,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private static final double CONE_FOV_DEG = 60.0;
     private static final int CONE_RADIUS_PX = 40;
 
-    /** Login/logout flips the tile scope (public bake vs the org's private bake),
-     * so accumulated coverage + the tile ledger are stale — drop them so the next
-     * download pulls from the correct bake. */
+    /** Login/logout changes the SET of tile scopes read (public alone vs the org's
+     * private bake + public), and the tile ledger is not scope-keyed, so both the
+     * accumulated coverage and the ledger are stale — drop them so the next
+     * download pulls every bake the new state can see. */
     private final Runnable authListener = () -> SwingUtilities.invokeLater(this::onAuthChanged);
 
     public MaprizonLayer() {
@@ -278,7 +279,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
     /**
-     * Layer name that states WHICH dataset is loaded — "public" or the org.
+     * Layer name that states WHICH datasets are loaded — public alone, or the org's
+     * imagery plus public.
      *
      * <p>Nothing in the UI used to say this, and it is the single most confusing
      * thing about the plugin: logged out you see only public imagery, which today
@@ -289,26 +291,27 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private static String audienceLayerName() {
         ViewerAuth auth = ViewerAuth.getInstance();
         if (auth.isLoggedIn()) {
-            // Logged in with no org loads the PUBLIC bake, so naming the user here
-            // would imply private coverage that is not present. Say what is
+            // Logged in with no org reads the PUBLIC bake only, so naming the user
+            // here would imply private coverage that is not present. Say what is
             // actually loaded, and why.
             if (isLoggedInWithoutOrg()) {
                 return "Maprizon Coverage — public only (no org on your account)";
             }
             String who = auth.email();
             if (!who.isEmpty()) {
-                return "Maprizon Coverage — " + who;
+                return "Maprizon Coverage — " + who + " + public";
             }
             String org = auth.orgId();
             if (org != null && !org.isEmpty()) {
-                return "Maprizon Coverage — " + org;
+                return "Maprizon Coverage — " + org + " + public";
             }
         }
         return "Maprizon Coverage — public imagery only";
     }
 
-    /** Login/logout: drop coverage (it belongs to the other audience) AND relabel,
-     * so the layer never claims to hold a dataset it no longer has. */
+    /** Login/logout: drop coverage (the set of scopes it was fetched under just
+     * changed) AND relabel, so the layer never claims to hold a dataset it no
+     * longer has — nor omits one it can now see. */
     private void onAuthChanged() {
         clearCoverage();
         setName(audienceLayerName());
@@ -799,6 +802,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // "tile done" is always the whole truth, and a later adjacent
                 // download simply re-decodes the ancestor for its own tiles.
                 Map<String, List<ImageryFeature>> ancestorCache = new HashMap<>();
+                // Resolved ONCE per download, not per tile: a login/logout landing
+                // mid-download would otherwise fetch part of the view under one set
+                // of scopes and the rest under another, while the tile ledger
+                // recorded all of it as done. (An auth change clears the layer
+                // anyway — this just makes the in-flight run internally consistent.)
+                final List<String> scopes = PmtilesTileLoader.currentScopes();
+                diag("scopes=" + scopes);
                 for (Map.Entry<String, int[]> e : rangesByFacing.entrySet()) {
                     String facing = e.getKey();
                     int[] r = e.getValue();
@@ -809,26 +819,56 @@ public class MaprizonLayer extends Layer implements MouseListener {
                             if (loadedTileKeys.contains(key) || emptyTileKeys.contains(key)) {
                                 continue;
                             }
-                            try {
-                                List<ImageryFeature> tileFeats =
-                                        loadWithOverzoom(facing, zoom, tx, ty, ancestorCache);
-                                acc.addAll(tileFeats);
-                                // Record the REQUESTED tile so a later download skips
-                                // it. Split by outcome: tiles WITH features go in the
-                                // main ledger, tiles that came back genuinely empty go
-                                // in the negative cache (see emptyTileKeys) so the dead
-                                // ground in a partially-covered area stops costing a
-                                // full ancestor walk on every download. Reaching this
-                                // line at all means the fetch SUCCEEDED — an IOException
-                                // lands below and records nothing, so real failures
-                                // still retry.
-                                if (tileFeats.isEmpty()) {
-                                    emptyTileKeys.add(key);
-                                } else {
-                                    loadedTileKeys.add(key);
+                            // UNION over every current scope. Logged in that is the
+                            // org's private bake AND the public bake — they are
+                            // disjoint datasets, not a superset relationship (see
+                            // PmtilesTileLoader.currentScopes). The overzoom walk runs
+                            // PER SCOPE rather than over a merged tile set: each bake
+                            // has its own extent and its own deepest baked zoom, and
+                            // the walk's "finest level that carries essentially all the
+                            // data" rule compares counts within one archive. Merged,
+                            // one scope having a z16 tile where the other stops at z15
+                            // would let that scope's thin fine tile win the level and
+                            // drop the other scope's data entirely.
+                            List<ImageryFeature> tileFeats = new ArrayList<>();
+                            boolean anyScopeFetched = false;
+                            IOException lastFailure = null;
+                            for (String scope : scopes) {
+                                try {
+                                    tileFeats.addAll(loadWithOverzoom(scope, facing, zoom, tx, ty, ancestorCache));
+                                    anyScopeFetched = true;
+                                } catch (IOException ioe) {
+                                    lastFailure = ioe;
+                                    Logging.warn("Maprizon: tile fetch failed " + scope + "/" + key
+                                            + ": " + ioe.getMessage());
                                 }
-                            } catch (IOException ioe) {
-                                Logging.warn("Maprizon: tile fetch failed " + key + ": " + ioe.getMessage());
+                            }
+                            acc.addAll(tileFeats);
+                            if (!anyScopeFetched) {
+                                // Every scope failed: record nothing, so a real
+                                // failure retries on the next download.
+                                continue;
+                            }
+                            if (lastFailure != null) {
+                                // Partial success (e.g. the org bake could not be
+                                // signed but public came back). Keep what we got, but
+                                // do NOT enter the tile in either ledger — ledger
+                                // entries mean "this tile's full content is stored",
+                                // and skipping it later would make a transient org
+                                // failure look like permanently missing coverage.
+                                continue;
+                            }
+                            // Record the REQUESTED tile so a later download skips
+                            // it. Split by outcome: tiles WITH features go in the
+                            // main ledger, tiles that came back genuinely empty go
+                            // in the negative cache (see emptyTileKeys) so the dead
+                            // ground in a partially-covered area stops costing a
+                            // full ancestor walk on every download. Reaching this
+                            // line at all means every scope's fetch SUCCEEDED.
+                            if (tileFeats.isEmpty()) {
+                                emptyTileKeys.add(key);
+                            } else {
+                                loadedTileKeys.add(key);
                             }
                         }
                     }
@@ -987,7 +1027,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 feats.size(), pts, minLon, maxLon, minLat, maxLat);
     }
 
-    private List<ImageryFeature> loadWithOverzoom(String facing, int zoom, int tx, int ty,
+    private List<ImageryFeature> loadWithOverzoom(String scope, String facing, int zoom, int tx, int ty,
                                                   Map<String, List<ImageryFeature>> ancestorCache) throws IOException {
         int az = zoom;
         int ax = tx;
@@ -1000,12 +1040,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
         List<List<ImageryFeature>> levelClipped = new ArrayList<>();
         StringBuilder presence = new StringBuilder(); // per-level: zN=raw/clip or zN=.
         for (int step = 0; step <= MAX_OVERZOOM_STEPS && az >= minZoom; step++) {
-            String ancestorKey = tileKey(facing, az, ax, ay);
+            // Scope-qualified: the same z/x/y holds DIFFERENT content in the org and
+            // public bakes, so an unqualified key would serve one scope's decode as
+            // the other's — silently dropping whichever scope was decoded second.
+            String ancestorKey = scope + "/" + tileKey(facing, az, ax, ay);
             List<ImageryFeature> features;
             if (ancestorCache.containsKey(ancestorKey)) {
                 features = ancestorCache.get(ancestorKey); // may be a cached MISS (null)
             } else {
-                features = loader.loadTileOrNull(facing, az, ax, ay);
+                features = loader.loadTileOrNull(scope, facing, az, ax, ay);
                 ancestorCache.put(ancestorKey, features);
             }
             if (features != null) {
@@ -1052,7 +1095,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         // Per requested tile: which zoom levels had a tile (raw/clipped counts),
         // which level won, and how much survived the clip. Reveals coarse-facing
         // clip-to-zero and any placement surprises. One line per fetched tile.
-        diag("  ozoom facing=" + facing + " req z" + zoom + "/" + tx + "/" + ty
+        diag("  ozoom scope=" + scope + " facing=" + facing + " req z" + zoom + "/" + tx + "/" + ty
                 + " levels[" + presence.toString().trim() + "] wonZ=" + bestZoom + " kept=" + best.size());
         return best;
     }
@@ -1347,7 +1390,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * Logged in, but the token carries no organization.
      *
      * <p>This state is silent and indistinguishable from a broken plugin:
-     * {@code PmtilesTileLoader.currentScope()} falls back to the PUBLIC bake when
+     * {@code PmtilesTileLoader.currentScopes()} yields the PUBLIC bake alone when
      * {@link ViewerAuth#orgId()} is empty, so the user sees only public coverage —
      * today a single small area — while the menu says they are logged in. The
      * server agrees, for what it is worth: {@code /tiles/sign} answers
@@ -1758,7 +1801,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 }
             });
         } else {
-            actions.add(new AbstractAction("Log in to Maprizon (view private imagery)") {
+            // "this session" is in the label because the login genuinely does not
+            // survive a JOSM restart (ViewerAuth keeps credentials in memory only),
+            // and a user who expects it to will read the next session's public-only
+            // map as the plugin having broken overnight.
+            actions.add(new AbstractAction("Log in to Maprizon (private imagery, this session)") {
                 @Override
                 public void actionPerformed(ActionEvent e) {
                     LoginFlow.start(MaprizonLayer.this::invalidate);

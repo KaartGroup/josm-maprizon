@@ -37,9 +37,16 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * is exactly what the viewer backend already accepts ({@code flaskr/auth/auth.py}:
  * Auth0 JWKS verify, audience {@link #AUDIENCE}).
  *
- * <p>Tokens (access + refresh + expiry + email) are persisted via JOSM
- * preferences so login survives restarts; the access token is refreshed silently
- * before expiry using the stored refresh token (no user interaction).
+ * <p><b>Credentials live for ONE JOSM session and are never written to disk.</b>
+ * Tokens (access + refresh + expiry + email + org) are held in memory on this
+ * singleton, so quitting JOSM logs you out and the next session must log in
+ * again. That is deliberate: a Maprizon account is used from more than one
+ * machine, and a token silently restored from preferences meant a user who
+ * thought they were logged out was still holding a live session — two machines
+ * stepping on each other with no way to tell from the UI. Within a session the
+ * access token is still refreshed silently before expiry using the in-memory
+ * refresh token (no user interaction). Tokens persisted by earlier versions are
+ * purged from preferences on first use — see {@link #purgePersistedTokens()}.
  *
  * @see LoginFlow for the interactive loopback half of the flow.
  */
@@ -72,11 +79,18 @@ public final class ViewerAuth {
 
     // --- JOSM preference keys ---
     private static final String PREF_CLIENT_ID = "maprizon.auth0.clientId"; // optional dev override
-    private static final String PREF_ACCESS = "maprizon.auth0.accessToken";
-    private static final String PREF_REFRESH = "maprizon.auth0.refreshToken";
-    private static final String PREF_EXPIRES_AT = "maprizon.auth0.expiresAt"; // epoch seconds
-    private static final String PREF_EMAIL = "maprizon.auth0.email";
-    private static final String PREF_ORG_ID = "maprizon.auth0.orgId"; // Auth0 org (org_xxx)
+    /**
+     * Keys earlier versions used to PERSIST the session. Kept only so
+     * {@link #purgePersistedTokens()} can delete them: nothing reads them, and
+     * nothing writes them any more.
+     */
+    private static final String[] LEGACY_TOKEN_PREFS = {
+        "maprizon.auth0.accessToken",
+        "maprizon.auth0.refreshToken",
+        "maprizon.auth0.expiresAt",
+        "maprizon.auth0.email",
+        "maprizon.auth0.orgId",
+    };
 
     /** Refresh the access token this many seconds before it actually expires. */
     private static final long REFRESH_SKEW_SECONDS = 120;
@@ -86,7 +100,55 @@ public final class ViewerAuth {
 
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
 
+    /**
+     * Guards the credential fields below. Deliberately NOT the instance monitor:
+     * {@link #getValidAccessToken()} makes a blocking token-refresh call, and the
+     * EDT reads {@link #isLoggedIn()} / {@link #email()} to paint menu labels and
+     * the layer name. Sharing one lock would freeze the UI for the length of a
+     * network round trip (or its timeout). Every critical section here is a few
+     * field assignments and never does I/O.
+     */
+    private final Object stateLock = new Object();
+    /** Serializes refreshes so concurrent tile fetches don't each mint a token.
+     * Held across HTTP; must never be taken while holding {@link #stateLock}. */
+    private final Object refreshLock = new Object();
+
+    // --- session-only credential state. Guarded by stateLock; never written to disk. ---
+    private String accessToken = "";
+    private String refreshToken = "";
+    private long expiresAtEpochSeconds;
+    private String email = "";
+    private String orgId = "";
+    /**
+     * Bumped on logout. A refresh already in flight when the user logs out
+     * carries the old generation and its result is DISCARDED — otherwise the
+     * response would silently re-establish the session a moment after the user
+     * logged out, which is the same "logged in when I thought I wasn't" failure
+     * this class now exists to prevent.
+     */
+    private long sessionGeneration;
+
     private ViewerAuth() {
+        purgePersistedTokens();
+    }
+
+    /**
+     * Delete any tokens written to preferences by an earlier version.
+     *
+     * <p>Without this, upgrading would leave a refresh token sitting in
+     * {@code preferences.xml} — unread by this build, but still a live credential
+     * on disk. Runs once, when the singleton is first touched.
+     */
+    private static void purgePersistedTokens() {
+        try {
+            for (String key : LEGACY_TOKEN_PREFS) {
+                Config.getPref().put(key, null); // null removes the entry outright
+            }
+        } catch (RuntimeException e) {
+            // Preferences not initialized (unit tests / very early startup). There
+            // is nothing to purge in that case, and this must never break login.
+            Logging.debug("Maprizon: could not purge legacy token prefs: " + e);
+        }
     }
 
     public static ViewerAuth getInstance() {
@@ -130,44 +192,55 @@ public final class ViewerAuth {
 
     // ---------------------------------------------------------- login state
 
-    /** True if we hold credentials (a refresh token, or a still-usable access token). */
+    /** True if we hold credentials (a refresh token, or a still-usable access token).
+     * Session-only: always false at the start of a new JOSM session. */
     public boolean isLoggedIn() {
-        return !Config.getPref().get(PREF_REFRESH, "").isEmpty()
-                || !Config.getPref().get(PREF_ACCESS, "").isEmpty();
+        synchronized (stateLock) {
+            return !refreshToken.isEmpty() || !accessToken.isEmpty();
+        }
     }
 
     /** The logged-in user's email, if known (for menu labels). May be empty. */
     public String email() {
-        return Config.getPref().get(PREF_EMAIL, "");
+        synchronized (stateLock) {
+            return email;
+        }
     }
 
     /**
      * The logged-in user's Auth0 organization id (e.g. {@code org_9alzx7S32reIQ86s}),
      * used to fetch the org's private per-facing PMTiles bake ({@code {org_id}-{facing}.pmtiles})
      * exactly as the viewer's {@code useMapTileUrls} does. Empty when unknown /
-     * logged out. Back-fills from the stored access token's claims on first use, so
-     * it also works for sessions that logged in before this feature existed.
+     * logged out. Back-fills from the current access token's claims if it was not
+     * captured at login.
      */
     public String orgId() {
-        String cached = Config.getPref().get(PREF_ORG_ID, "");
-        if (!cached.isEmpty()) {
-            return cached;
+        synchronized (stateLock) {
+            if (!orgId.isEmpty()) {
+                return orgId;
+            }
+            String org = orgIdFromJwt(accessToken);
+            if (org != null && !org.isEmpty()) {
+                orgId = org;
+                return org;
+            }
+            return "";
         }
-        String org = orgIdFromJwt(Config.getPref().get(PREF_ACCESS, ""));
-        if (org != null && !org.isEmpty()) {
-            Config.getPref().put(PREF_ORG_ID, org);
-            return org;
-        }
-        return "";
     }
 
     /** Forget all credentials. Fires a state-change so callers can refresh UI/imagery. */
     public void logout() {
-        Config.getPref().put(PREF_ACCESS, "");
-        Config.getPref().put(PREF_REFRESH, "");
-        Config.getPref().put(PREF_EXPIRES_AT, null);
-        Config.getPref().put(PREF_EMAIL, "");
-        Config.getPref().put(PREF_ORG_ID, "");
+        synchronized (stateLock) {
+            accessToken = "";
+            refreshToken = "";
+            expiresAtEpochSeconds = 0L;
+            email = "";
+            orgId = "";
+            sessionGeneration++;
+        }
+        // Belt and braces: an install upgrading mid-session may still carry the old
+        // on-disk copy, and "log out" must not leave a credential behind anywhere.
+        purgePersistedTokens();
         fireChanged();
     }
 
@@ -181,28 +254,48 @@ public final class ViewerAuth {
      *
      * <p>Blocking (may do a token-refresh HTTP call); call off the EDT.
      */
-    public synchronized String getValidAccessToken() {
-        String access = Config.getPref().get(PREF_ACCESS, "");
-        long expiresAt = Config.getPref().getLong(PREF_EXPIRES_AT, 0L);
-        long now = System.currentTimeMillis() / 1000L;
-
-        if (!access.isEmpty() && now < expiresAt - REFRESH_SKEW_SECONDS) {
-            return access;
+    public String getValidAccessToken() {
+        String access;
+        String refresh;
+        long generation;
+        synchronized (stateLock) {
+            access = accessToken;
+            refresh = refreshToken;
+            generation = sessionGeneration;
+            if (isFresh(access, expiresAtEpochSeconds)) {
+                return access;
+            }
         }
-
-        String refresh = Config.getPref().get(PREF_REFRESH, "");
         if (refresh.isEmpty()) {
             return access.isEmpty() ? null : access;
         }
 
-        try {
-            TokenResponse tr = refresh(refresh);
-            storeTokens(tr);
-            return tr.accessToken;
-        } catch (IOException e) {
-            Logging.warn("Maprizon: token refresh failed, treating as logged out: " + e);
-            return null;
+        // One refresh at a time. Held across HTTP, which is why the EDT-facing
+        // accessors above use stateLock instead of this.
+        synchronized (refreshLock) {
+            synchronized (stateLock) {
+                // Another thread may have refreshed while we queued here.
+                if (isFresh(accessToken, expiresAtEpochSeconds)) {
+                    return accessToken;
+                }
+                if (sessionGeneration != generation) {
+                    return null; // logged out while we waited
+                }
+            }
+            try {
+                TokenResponse tr = refresh(refresh);
+                return storeTokensIfCurrent(tr, generation) ? tr.accessToken : null;
+            } catch (IOException e) {
+                Logging.warn("Maprizon: token refresh failed, treating as logged out: " + e);
+                return null;
+            }
         }
+    }
+
+    /** Caller must hold {@link #stateLock} for the expiry it passes in. */
+    private static boolean isFresh(String access, long expiresAt) {
+        return !access.isEmpty()
+                && System.currentTimeMillis() / 1000L < expiresAt - REFRESH_SKEW_SECONDS;
     }
 
     // -------------------------------------------------------- PKCE helpers
@@ -276,19 +369,44 @@ public final class ViewerAuth {
         return TokenResponse.from(root);
     }
 
+    /** In-memory only, by design — see the class javadoc. Unconditional: used by
+     * {@link #exchangeCode}, where a fresh interactive login IS the new session. */
     private void storeTokens(TokenResponse tr) {
-        Config.getPref().put(PREF_ACCESS, tr.accessToken);
+        synchronized (stateLock) {
+            applyTokens(tr);
+        }
+    }
+
+    /**
+     * Store a refreshed token unless the session it belongs to has since ended.
+     *
+     * @return false if the user logged out while the refresh was in flight, in
+     *         which case the token is dropped and the session stays ended.
+     */
+    private boolean storeTokensIfCurrent(TokenResponse tr, long generation) {
+        synchronized (stateLock) {
+            if (sessionGeneration != generation) {
+                Logging.info("Maprizon: discarding refreshed token — logged out mid-refresh");
+                return false;
+            }
+            applyTokens(tr);
+            return true;
+        }
+    }
+
+    /** Caller must hold {@link #stateLock}. */
+    private void applyTokens(TokenResponse tr) {
+        accessToken = tr.accessToken;
         if (tr.refreshToken != null && !tr.refreshToken.isEmpty()) {
             // Auth0 may or may not rotate the refresh token; only overwrite when present.
-            Config.getPref().put(PREF_REFRESH, tr.refreshToken);
+            refreshToken = tr.refreshToken;
         }
-        long expiresAt = System.currentTimeMillis() / 1000L + tr.expiresIn;
-        Config.getPref().putLong(PREF_EXPIRES_AT, expiresAt);
+        expiresAtEpochSeconds = System.currentTimeMillis() / 1000L + tr.expiresIn;
         // Refresh the org id from the new token's claims (authoritative; handles a
         // user who switched orgs). Only overwrite when the claim is present.
         String org = orgIdFromJwt(tr.accessToken);
         if (org != null && !org.isEmpty()) {
-            Config.getPref().put(PREF_ORG_ID, org);
+            orgId = org;
         }
     }
 
@@ -334,8 +452,10 @@ public final class ViewerAuth {
             if (res.getResponseCode() == 200) {
                 JsonObject root = parse(res.fetchContent());
                 if (root != null) {
-                    String email = root.getString("email", root.getString("name", ""));
-                    Config.getPref().put(PREF_EMAIL, email);
+                    String who = root.getString("email", root.getString("name", ""));
+                    synchronized (stateLock) {
+                        email = who;
+                    }
                 }
             }
         } catch (IOException | RuntimeException e) {

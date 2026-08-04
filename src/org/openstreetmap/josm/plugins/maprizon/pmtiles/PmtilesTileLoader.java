@@ -55,20 +55,37 @@ public final class PmtilesTileLoader implements AutoCloseable {
     private final Map<String, PmtilesArchive> archivesByFacing = new ConcurrentHashMap<>();
 
     /**
-     * Tileset scope for the current auth state: the logged-in user's Auth0 org id
-     * (its private bake {@code {org_id}-{facing}.pmtiles}) when available, else the
-     * public bake. Mirrors the viewer's {@code useMapTileUrls}. Anonymous is always
-     * the safe fallback, so a missing org id can never break the public path.
+     * Every tileset scope to read for the current auth state, in priority order.
+     *
+     * <p>Logged in with an org: the org's private bake {@code {org_id}-{facing}.pmtiles}
+     * <b>AND</b> the public bake. Logged out (or no org on the token): the public
+     * bake alone.
+     *
+     * <p><b>The public bake is NOT a subset of the org bake, and this used to
+     * return only one scope.</b> The tile-baker scopes an org's archive with
+     * {@code f.org_id = :org} and nothing else (tile-baker/orchestrator.py), so it
+     * holds that org's imagery — and no other org's. Public imagery from every
+     * other org lives only in {@code public_imagery-*}. Serving one scope therefore
+     * made logging in DELETE coverage from the map: an area covered by public
+     * imagery downloaded fine logged out and reported "no imagery exists in this
+     * view" logged in, which is the exact opposite of what a login is for. (The web
+     * viewer swaps rather than unions, but it is a per-org product surface; the
+     * JOSM plugin is a coverage tool for mappers, where more coverage is the point.)
+     *
+     * <p>Org first so its finer/private data wins any per-scope tie-break upstream;
+     * duplicates where an org's own public imagery appears in both bakes are
+     * collapsed by the layer's feature-key dedup. Anonymous is always the safe
+     * fallback, so a missing org id can never break the public path.
      */
-    private static String currentScope() {
+    public static List<String> currentScopes() {
         ViewerAuth auth = ViewerAuth.getInstance();
         if (auth.isLoggedIn()) {
             String org = auth.orgId();
             if (org != null && !org.isEmpty()) {
-                return org;
+                return List.of(org, FacingStyle.PUBLIC_SCOPE);
             }
         }
-        return FacingStyle.PUBLIC_SCOPE;
+        return List.of(FacingStyle.PUBLIC_SCOPE);
     }
 
     /**
@@ -139,8 +156,8 @@ public final class PmtilesTileLoader implements AutoCloseable {
         archivesByFacing.keySet().removeIf(k -> k.startsWith(prefix));
     }
 
-    private PmtilesArchive archiveFor(String facing) throws IOException {
-        return archiveFor(facing, false);
+    private PmtilesArchive archiveFor(String scope, String facing) throws IOException {
+        return archiveFor(scope, facing, false);
     }
 
     /**
@@ -148,8 +165,7 @@ public final class PmtilesTileLoader implements AutoCloseable {
      *                    batch still looks current — used after a 403, which is
      *                    how a revoked/rotated signature announces itself.
      */
-    private PmtilesArchive archiveFor(String facing, boolean forceResign) throws IOException {
-        String scope = currentScope();
+    private PmtilesArchive archiveFor(String scope, String facing, boolean forceResign) throws IOException {
         String key = scope + "/" + facing;
         if (!forceResign) {
             PmtilesArchive existing = archivesByFacing.get(key);
@@ -187,35 +203,80 @@ public final class PmtilesTileLoader implements AutoCloseable {
         }
     }
 
+    /**
+     * Widest zoom range across every current scope — the floor of the overzoom
+     * walk and the ceiling of a tile request. Taken as min-of-mins / max-of-maxes
+     * rather than from one scope: the org and public bakes are baked independently
+     * (their extents differ), so narrowing to a single scope's header would make
+     * the other scope's finest or coarsest tiles unreachable.
+     *
+     * <p>A scope that cannot be opened is skipped; only if EVERY scope fails does
+     * the exception propagate, so an unsignable org bake can't take the public
+     * range down with it.
+     */
     public int getMinZoom(String facing) throws IOException {
-        try {
-            return archiveFor(facing).minZoom();
-        } catch (PmtilesArchive.PmtilesForbiddenException e) {
-            return archiveFor(facing, true).minZoom();
+        int min = Integer.MAX_VALUE;
+        IOException last = null;
+        for (String scope : currentScopes()) {
+            try {
+                min = Math.min(min, openArchive(scope, facing).minZoom());
+            } catch (IOException e) {
+                last = e;
+            }
         }
+        if (min == Integer.MAX_VALUE) {
+            throw last != null ? last : new IOException("no readable archive for " + facing);
+        }
+        return min;
     }
 
     public int getMaxZoom(String facing) throws IOException {
-        try {
-            return archiveFor(facing).maxZoom();
-        } catch (PmtilesArchive.PmtilesForbiddenException e) {
-            return archiveFor(facing, true).maxZoom();
+        int max = Integer.MIN_VALUE;
+        IOException last = null;
+        for (String scope : currentScopes()) {
+            try {
+                max = Math.max(max, openArchive(scope, facing).maxZoom());
+            } catch (IOException e) {
+                last = e;
+            }
         }
+        if (max == Integer.MIN_VALUE) {
+            throw last != null ? last : new IOException("no readable archive for " + facing);
+        }
+        return max;
     }
 
     /**
-     * Does this facing's archive hold a tile at {@code (z,x,y)}? Local lookup in
-     * the decoded directory — NO network request.
+     * Does this facing's archive hold a tile at {@code (z,x,y)} in ANY current
+     * scope? Local lookup in the decoded directory — NO network request.
      *
      * <p>Exposed because it changes what callers can do: the fetch path no longer
      * has to request a tile to find out whether it exists, which is what the
      * ancestor walk and the empty-tile ledger were compensating for.
      */
     public boolean hasTile(String facing, int z, int x, int y) throws IOException {
+        IOException last = null;
+        for (String scope : currentScopes()) {
+            try {
+                if (openArchive(scope, facing).hasTile(z, x, y)) {
+                    return true;
+                }
+            } catch (IOException e) {
+                last = e;
+            }
+        }
+        if (last != null) {
+            throw last;
+        }
+        return false;
+    }
+
+    /** Open (or reuse) one scope's archive, re-signing once if its signature died. */
+    private PmtilesArchive openArchive(String scope, String facing) throws IOException {
         try {
-            return archiveFor(facing).hasTile(z, x, y);
+            return archiveFor(scope, facing);
         } catch (PmtilesArchive.PmtilesForbiddenException e) {
-            return archiveFor(facing, true).hasTile(z, x, y);
+            return archiveFor(scope, facing, true);
         }
     }
 
@@ -224,8 +285,8 @@ public final class PmtilesTileLoader implements AutoCloseable {
      * null) if the tile has no data at this z/x/y (sparse coverage) or no
      * "imagery" layer.
      */
-    public List<ImageryFeature> loadTile(String facing, int z, int x, int y) throws IOException {
-        List<ImageryFeature> features = loadTileOrNull(facing, z, x, y);
+    public List<ImageryFeature> loadTile(String scope, String facing, int z, int x, int y) throws IOException {
+        List<ImageryFeature> features = loadTileOrNull(scope, facing, z, x, y);
         return features != null ? features : java.util.Collections.emptyList();
     }
 
@@ -242,7 +303,8 @@ public final class PmtilesTileLoader implements AutoCloseable {
      * because the bundled reader's tile-id math overflowed at z16. See
      * {@link TileId#zxyToIndex(int, long, long)}.
      */
-    public List<ImageryFeature> loadTileOrNull(String facing, int z, int x, int y) throws IOException {
+    public List<ImageryFeature> loadTileOrNull(String scope, String facing, int z, int x, int y)
+            throws IOException {
         // `archive` is needed further down for the tile-compression byte, so it
         // must outlive the retry — and it may be a DIFFERENT archive after
         // re-signing.
@@ -252,15 +314,15 @@ public final class PmtilesTileLoader implements AutoCloseable {
             // Both calls are inside the try on purpose: a dead signature can
             // surface either from open() (it eagerly reads header + directory) or
             // from getTile().
-            archive = archiveFor(facing);
+            archive = archiveFor(scope, facing);
             raw = archive.getTile(z, x, y);
         } catch (PmtilesArchive.PmtilesForbiddenException e) {
             // The presignature died mid-session (they last 24h and a JOSM session
             // can outlive that, especially across a laptop sleep). Re-sign once and
             // retry. This is now a real HTTP status rather than a substring match
             // on an exception message.
-            Logging.info("Maprizon: tile signature expired for " + facing + ", re-signing");
-            archive = archiveFor(facing, true);
+            Logging.info("Maprizon: tile signature expired for " + scope + "/" + facing + ", re-signing");
+            archive = archiveFor(scope, facing, true);
             raw = archive.getTile(z, x, y);
         }
         if (raw == null) {
