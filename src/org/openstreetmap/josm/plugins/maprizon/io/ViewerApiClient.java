@@ -98,6 +98,55 @@ public final class ViewerApiClient {
     }
 
     /**
+     * Attempt a signing call and describe the OUTCOME in one line, for the
+     * diagnostics dialog.
+     *
+     * <p><b>A success is described by the facings it covered, never by the URLs.</b>
+     * Those URLs carry the signature granting read access to the org's private
+     * imagery — printing them into a dialog the user is invited to copy and paste
+     * would hand out precisely the credential this endpoint exists to protect.
+     *
+     * <p>Blocking; call OFF the EDT.
+     */
+    public static String describeSignAttempt() {
+        SignedTileUrls urls = signedTileUrls();
+        if (urls != null) {
+            return "HTTP 200 — signed " + urls.urls.size() + " facings ("
+                    + String.join(", ", new java.util.TreeSet<>(urls.urls.keySet()))
+                    + "), valid for "
+                    + Math.max(0, urls.expiresAtEpochSeconds - System.currentTimeMillis() / 1000L)
+                    + "s. Private tiles ARE reachable.";
+        }
+        String why = lastSignFailure();
+        return "FAILED — " + (why == null ? "reason not recorded" : why);
+    }
+
+    /**
+     * Read the first bytes of a public archive with no auth, so the report can
+     * tell "the private path is broken" apart from "this machine cannot reach the
+     * tile store at all". Blocking; call OFF the EDT.
+     */
+    public static String describePublicTileProbe() {
+        String url = org.openstreetmap.josm.plugins.maprizon.FacingStyle.pmtilesUrlFor("front");
+        try {
+            java.net.HttpURLConnection c =
+                    (java.net.HttpURLConnection) new URL(url).openConnection();
+            c.setRequestProperty("Range", "bytes=0-126");
+            c.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            c.setReadTimeout(READ_TIMEOUT_MS);
+            try {
+                int code = c.getResponseCode();
+                return "HTTP " + code + (code == 200 || code == 206
+                        ? " — public tiles reachable." : " — public tiles NOT reachable.");
+            } finally {
+                c.disconnect();
+            }
+        } catch (IOException | RuntimeException ex) {
+            return "FAILED — " + ex;
+        }
+    }
+
+    /**
      * Fetch presigned URLs for the logged-in user's per-org baked PMTiles.
      *
      * <p>Why this exists: the per-org tilesets became PRIVATE in Spaces on

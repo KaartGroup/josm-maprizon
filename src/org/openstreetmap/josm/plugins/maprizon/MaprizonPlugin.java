@@ -9,6 +9,7 @@ import org.openstreetmap.josm.gui.MapFrame;
 import org.openstreetmap.josm.plugins.Plugin;
 import org.openstreetmap.josm.plugins.PluginInformation;
 import org.openstreetmap.josm.plugins.maprizon.actions.DownloadMaprizonCoverageAction;
+import org.openstreetmap.josm.plugins.maprizon.actions.ShowMaprizonDiagnosticsAction;
 import org.openstreetmap.josm.plugins.maprizon.actions.ShowMaprizonHelpAction;
 import org.openstreetmap.josm.plugins.maprizon.actions.ToggleMaprizonLayerAction;
 import org.openstreetmap.josm.plugins.maprizon.gui.MaprizonImageDialog;
@@ -49,6 +50,7 @@ public class MaprizonPlugin extends Plugin {
         maprizonMenu.add(buildMenuItem(new ToggleMaprizonLayerAction()));
         maprizonMenu.add(buildMenuItem(new DownloadMaprizonCoverageAction()));
         maprizonMenu.addSeparator();
+        maprizonMenu.add(buildMenuItem(new ShowMaprizonDiagnosticsAction()));
         maprizonMenu.add(buildMenuItem(new ShowMaprizonHelpAction()));
         menu.addMenu(maprizonMenu, "Maprizon", KeyEvent.VK_M, menu.getMenuCount(), null);
 
