@@ -12,6 +12,7 @@ import org.openstreetmap.josm.gui.Notification;
 import org.openstreetmap.josm.gui.dialogs.LayerListDialog;
 import org.openstreetmap.josm.gui.layer.Layer;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
+import org.openstreetmap.josm.plugins.maprizon.MaprizonLog;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
 import org.openstreetmap.josm.plugins.maprizon.gui.MaprizonImageDialog;
 import org.openstreetmap.josm.plugins.maprizon.oauth.LoginFlow;
@@ -177,7 +178,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "1.0.8";
+    private static final String BUILD_TAG = "1.0.9";
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -920,8 +921,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
                                     if (scopeFailureMessage == null) {
                                         scopeFailureMessage = ioe.getMessage();
                                     }
-                                    Logging.warn("Maprizon: tile fetch failed " + scope + "/" + key
-                                            + ": " + ioe.getMessage());
+                                    MaprizonLog.warn("tile fetch failed " + scope + "/" + key
+                                            + ": " + ioe);
                                 }
                             }
                             acc.addAll(tileFeats);
@@ -981,12 +982,24 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 }
                 final String failedScope = deadScope;
                 final String failedReason = scopeFailureMessage;
+                // Any failure at all, not only a scope that failed EVERYWHERE. A
+                // partial failure leaves holes in the coverage that look exactly
+                // like "there is no imagery here", and it used to be reported
+                // nowhere: the notification below fires only when a scope managed
+                // zero successes, so a fault that spared even one tile was silent.
+                int totalFailedTiles = 0;
+                for (int[] st : scopeStats.values()) {
+                    totalFailedTiles += st[1];
+                }
+                final int failedTiles = totalFailedTiles;
                 diag("scope outcomes " + scopeStats.entrySet().stream()
                         .map(en -> en.getKey() + "{ok=" + en.getValue()[0] + ",failed=" + en.getValue()[1] + "}")
                         .collect(java.util.stream.Collectors.joining(" ")));
                 SwingUtilities.invokeLater(() -> {
                     if (failedScope != null) {
                         showOrgScopeUnavailable(failedScope, failedReason);
+                    } else if (failedTiles > 0 && userInitiated) {
+                        showPartialFetchFailure(failedTiles, failedReason);
                     }
                     // Merge dedups (a line spans many tiles); report what was ADDED
                     // per facing, so a download states exactly what it contributed.
@@ -1615,7 +1628,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * an org whose bake does not exist yet — so name the scope and the error.
      */
     private void showOrgScopeUnavailable(String scope, String reason) {
-        Logging.warn("Maprizon: private tileset " + scope + " unavailable: " + reason);
+        MaprizonLog.warn("private tileset " + scope + " unavailable: " + reason);
         // When the token is missing the claim the SERVER scopes by, say so
         // outright rather than leaving a bare 403 to be interpreted. This plugin
         // accepts a custom org claim that NO part of the backend reads, so it can
@@ -1637,6 +1650,27 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 .setIcon(JOptionPane.WARNING_MESSAGE)
                 .setDuration(Notification.TIME_LONG)
                 .show();
+    }
+
+    /**
+     * Some tiles failed while others succeeded, so the map is showing coverage
+     * with holes in it. Reported because the holes are indistinguishable from
+     * genuinely-uncovered ground, and the download otherwise announces success.
+     *
+     * <p>A dialog rather than a fading notification: this is the message that has
+     * had to be reproduced and screenshotted to be read, and the full text is in
+     * {@code maprizon.log} either way.
+     */
+    private void showPartialFetchFailure(int failedTiles, String reason) {
+        JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
+                failedTiles + " tile(s) failed to load, so this area's coverage is\n"
+                        + "incomplete — the gaps are NOT necessarily uncovered ground.\n\n"
+                        + "First error:\n" + (reason == null ? "(not recorded)" : reason)
+                        + "\n\nThe full log is at:\n" + MaprizonLog.file()
+                        + "\n\nThose tiles were not recorded as done, so downloading\n"
+                        + "again will retry them.",
+                "Maprizon: incomplete download",
+                JOptionPane.WARNING_MESSAGE);
     }
 
     /** Explicit download that planned no tiles because every facing is hidden.

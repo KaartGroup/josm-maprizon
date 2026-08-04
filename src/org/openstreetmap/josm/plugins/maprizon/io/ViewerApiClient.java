@@ -257,7 +257,7 @@ public final class ViewerApiClient {
         String token = ViewerAuth.getInstance().getValidAccessToken();
         if (token == null) {
             lastSignFailure = "no usable access token (login expired or refresh failed)";
-            Logging.warn("Maprizon: " + lastSignFailure);
+            org.openstreetmap.josm.plugins.maprizon.MaprizonLog.warn(lastSignFailure);
             return null; // anonymous: caller uses the public, unsigned bake
         }
         try {
@@ -288,7 +288,7 @@ public final class ViewerApiClient {
                 lastSignFailure = "tiles/sign returned HTTP " + res.getResponseCode()
                         + (detail == null || detail.isEmpty() ? "" : ": " + detail)
                         + " [" + ViewerAuth.getInstance().orgClaimSummary() + "]";
-                Logging.warn("Maprizon: " + lastSignFailure);
+                org.openstreetmap.josm.plugins.maprizon.MaprizonLog.warn(lastSignFailure);
                 return null;
             }
             try (JsonReader reader = Json.createReader(
@@ -328,11 +328,15 @@ public final class ViewerApiClient {
                     return null;
                 }
                 lastSignFailure = null; // success
+                org.openstreetmap.josm.plugins.maprizon.MaprizonLog.info(
+                        "tiles/sign OK — " + urls.size() + " facings signed: "
+                        + new java.util.TreeSet<>(urls.keySet()));
                 return new SignedTileUrls(urls, expiresAt);
             }
         } catch (IOException | RuntimeException e) {
             lastSignFailure = "tiles/sign request failed: " + e;
-            Logging.warn("Maprizon: " + lastSignFailure + ", falling back to public tiles");
+            org.openstreetmap.josm.plugins.maprizon.MaprizonLog.warn(
+                    lastSignFailure + ", falling back to public tiles");
             return null;
         }
     }

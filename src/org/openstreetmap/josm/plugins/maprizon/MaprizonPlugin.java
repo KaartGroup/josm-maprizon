@@ -54,7 +54,9 @@ public class MaprizonPlugin extends Plugin {
         maprizonMenu.add(buildMenuItem(new ShowMaprizonHelpAction()));
         menu.addMenu(maprizonMenu, "Maprizon", KeyEvent.VK_M, menu.getMenuCount(), null);
 
-        Logging.info("Maprizon plugin loaded successfully");
+        MaprizonLog.info("plugin loaded, version "
+                + (info == null || info.version == null ? "?" : info.version)
+                + " — log file: " + MaprizonLog.file());
     }
 
     /** A Tools-menu item wired directly to the action's actionPerformed, carrying
