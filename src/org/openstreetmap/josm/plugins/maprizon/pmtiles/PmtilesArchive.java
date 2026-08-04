@@ -10,6 +10,8 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.List;
 
 /**
@@ -30,12 +32,21 @@ import java.util.List;
  * did: read the header, hold the tile index, and range-read a tile body. Tile
  * decoding (gzip + MVT) stays in {@code PmtilesTileLoader}.
  *
- * <p><b>Two things this buys beyond fixing z16.</b> Tile existence becomes a LOCAL
- * lookup — {@link #hasTile(int, long, long)} answers with zero HTTP, so the
- * fetch path no longer has to probe-and-miss to discover what is there. And range
+ * <p><b>Two things this buys beyond fixing z16.</b> Tile existence is answered from
+ * the decoded index — {@link #hasTile(int, long, long)} needs no TILE fetch, so the
+ * fetch path does not have to probe-and-miss to discover what is there. And range
  * reads go through {@link #readRange}, which sees the real HTTP status code, so an
  * expired presigned URL is detected as a genuine 403 instead of by matching "403"
  * inside an exception message.
+ *
+ * <p><b>The index is followed all the way down.</b> A v3 archive too large for its
+ * index to fit in the root spills the rest into LEAF DIRECTORIES, reached through
+ * root entries with {@code runLength == 0}. This class used to read the root only
+ * and treat those pointers as "no tile", which reported every tile behind them as
+ * absent — no error, no tiles, an empty map after a download that looked like it
+ * worked. It went unnoticed because the public per-facing bakes (~1300 tiles, a
+ * ~3 KB root) have no leaves at all, while an organization's full bake is mostly
+ * leaves. See {@link #find(long)}.
  *
  * <p>Not thread-safe on {@link #open()}; callers serialize construction (the tile
  * loader does this under its own monitor). Reads after opening are safe.
@@ -49,65 +60,166 @@ public final class PmtilesArchive {
     private static final int CONNECT_TIMEOUT_MS = 15_000;
     private static final int READ_TIMEOUT_MS = 30_000;
 
+    /** Depth limit on the root -> leaf -> ... walk. The v3 spec uses one leaf level
+     * in practice; this only stops a malformed archive looping forever. */
+    private static final int MAX_DIR_DEPTH = 4;
+
+    /** Decoded leaf directories to keep, keyed by their offset. A leaf is ~16 KB of
+     * arrays, so this bounds the index cache at a few MB while a download over one
+     * area re-hits the same handful of leaves constantly. */
+    private static final int LEAF_CACHE_ENTRIES = 64;
+
     private final String url;
     private PmtilesDirectory.Header header;
-    /** Entry starts, ascending — PMTiles v3 directories are sorted by tile id, and
-     * {@link #open()} asserts it rather than assuming it. */
-    private long[] starts;
-    private long[] runs;
-    private long[] offsets;
-    private long[] lengths;
+    /** The root directory. For a small archive this is the whole index; for a large
+     * one its {@code runLength == 0} entries point at leaf directories. */
+    private Dir root;
+
+    /**
+     * One decoded directory — root or leaf.
+     *
+     * <p>Entry starts are ascending: PMTiles v3 requires directories sorted by tile
+     * id, and {@link #of} asserts it rather than assuming it, because the binary
+     * search below silently returns the WRONG tile otherwise.
+     */
+    private static final class Dir {
+        final long[] starts;
+        final long[] runs;
+        final long[] offsets;
+        final long[] lengths;
+
+        private Dir(long[] starts, long[] runs, long[] offsets, long[] lengths) {
+            this.starts = starts;
+            this.runs = runs;
+            this.offsets = offsets;
+            this.lengths = lengths;
+        }
+
+        static Dir of(List<PmtilesDirectory.Entry> entries, String what) throws IOException {
+            int n = entries.size();
+            long[] starts = new long[n];
+            long[] runs = new long[n];
+            long[] offsets = new long[n];
+            long[] lengths = new long[n];
+            for (int i = 0; i < n; i++) {
+                PmtilesDirectory.Entry e = entries.get(i);
+                starts[i] = e.tileId;
+                runs[i] = e.runLength;
+                offsets[i] = e.offset;
+                lengths[i] = e.length;
+                if (i > 0 && starts[i] < starts[i - 1]) {
+                    // Refuse rather than return subtly wrong geometry.
+                    throw new IOException("PMTiles " + what + " is not sorted by tile id");
+                }
+            }
+            return new Dir(starts, runs, offsets, lengths);
+        }
+
+        /** Index of the last entry whose start is <= {@code tileId}, or -1.
+         * That entry is the only candidate: it either covers the id in its run, or
+         * (runLength 0) is the leaf directory the id would live in. */
+        int locate(long tileId) {
+            int i = Arrays.binarySearch(starts, tileId);
+            if (i >= 0) {
+                return i;
+            }
+            return -i - 2;
+        }
+    }
 
     public PmtilesArchive(String url) {
         this.url = url;
     }
 
-    /** Fetch + parse the header and the root directory. One range read each. */
+    /** Fetch + parse the header and the root directory. One range read each; leaf
+     * directories are fetched lazily, per tile lookup, and cached. */
     public void open() throws IOException {
         byte[] head = readRange(0, PmtilesDirectory.HEADER_BYTES - 1);
         PmtilesDirectory.Header h = PmtilesDirectory.parseHeader(head);
         if (h.specVersion != 3) {
             throw new IOException("unsupported PMTiles spec version " + h.specVersion);
         }
-        byte[] raw = readRange(h.rootOffset, h.rootOffset + h.rootLength - 1);
-        byte[] dir = h.internalCompression == PmtilesDirectory.COMPRESSION_GZIP
-                ? PmtilesTileLoader.gunzip(raw)
-                : raw;
-        List<PmtilesDirectory.Entry> entries = PmtilesDirectory.decodeEntries(dir);
-
-        int n = entries.size();
-        starts = new long[n];
-        runs = new long[n];
-        offsets = new long[n];
-        lengths = new long[n];
-        boolean sorted = true;
-        for (int i = 0; i < n; i++) {
-            PmtilesDirectory.Entry e = entries.get(i);
-            starts[i] = e.tileId;
-            runs[i] = e.runLength;
-            offsets[i] = e.offset;
-            lengths[i] = e.length;
-            if (i > 0 && starts[i] < starts[i - 1]) {
-                sorted = false;
-            }
-        }
-        if (!sorted) {
-            // Binary search below depends on this. Rather than silently return
-            // wrong tiles, refuse the archive — the caller falls back to "no data"
-            // for this facing, which is visible, instead of subtly wrong geometry.
-            throw new IOException("PMTiles directory is not sorted by tile id");
-        }
+        this.root = readDir(h, h.rootOffset, h.rootLength, "root directory");
         this.header = h;
 
         if (!h.isFullyInRoot()) {
-            // Leaf directories exist, so this index is PARTIAL. Every current
-            // Maprizon archive has leaf_dirs_length == 0, so this is a
-            // future-proofing signal rather than a live case; log loudly because
-            // the symptom would be "some tiles mysteriously missing".
-            Logging.warn("Maprizon: " + url + " uses leaf directories ("
-                    + h.leafDirsLength + " bytes) — tile index is incomplete, "
-                    + "deep tiles may be reported absent");
+            Logging.info("Maprizon: " + redact(url) + " uses leaf directories ("
+                    + h.leafDirsLength + " bytes); they will be followed on demand");
         }
+    }
+
+    /** Range-read, decompress and decode one directory. */
+    private Dir readDir(PmtilesDirectory.Header h, long offset, long length, String what)
+            throws IOException {
+        byte[] raw = readRange(offset, offset + length - 1);
+        byte[] dir = h.internalCompression == PmtilesDirectory.COMPRESSION_GZIP
+                ? PmtilesTileLoader.gunzip(raw)
+                : raw;
+        return Dir.of(PmtilesDirectory.decodeEntries(dir), what);
+    }
+
+    /**
+     * Decoded leaf directories, most-recently-used last, bounded to
+     * {@link #LEAF_CACHE_ENTRIES}. Accessed only under {@code this}.
+     */
+    private final LinkedHashMap<Long, Dir> leafCache =
+            new LinkedHashMap<Long, Dir>(16, 0.75f, true) {
+                private static final long serialVersionUID = 1L;
+
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Long, Dir> eldest) {
+                    return size() > LEAF_CACHE_ENTRIES;
+                }
+            };
+
+    private synchronized Dir leafDir(long offset, long length) throws IOException {
+        Dir cached = leafCache.get(offset);
+        if (cached != null) {
+            return cached;
+        }
+        Dir d = readDir(header, header.leafDirsOffset + offset, length, "leaf directory");
+        leafCache.put(offset, d);
+        return d;
+    }
+
+    /**
+     * Resolve a tile id to {@code {offset, length}} of its body, or null when the
+     * archive holds no tile there.
+     *
+     * <p><b>This is what was missing, and it is why a large archive looked empty.</b>
+     * A v3 directory entry with {@code runLength == 0} is not "no tile" — it is a
+     * pointer to a LEAF DIRECTORY holding that stretch of the index. Small archives
+     * (the public per-facing bakes: ~1300 tiles, a ~3 KB root) never produce one, so
+     * root-only lookups worked and looked correct. A big archive — an org's whole
+     * bake — spills most of its index into leaves, and treating those pointers as
+     * absent reported EVERY tile behind them as missing: no error, no tiles, an
+     * empty map after a download that appeared to succeed.
+     */
+    private long[] find(long tileId) throws IOException {
+        Dir dir = root;
+        for (int depth = 0; depth < MAX_DIR_DEPTH; depth++) {
+            if (dir == null) {
+                return null;
+            }
+            int i = dir.locate(tileId);
+            if (i < 0) {
+                return null;
+            }
+            long run = dir.runs[i];
+            if (run > 0) {
+                // Tile entry: several consecutive ids can share one deduplicated
+                // body, so the run must actually cover this id.
+                return (tileId >= dir.starts[i] && tileId < dir.starts[i] + run)
+                        ? new long[]{dir.offsets[i], dir.lengths[i]}
+                        : null;
+            }
+            if (dir.lengths[i] <= 0) {
+                return null; // empty leaf pointer: nothing addressed here
+            }
+            dir = leafDir(dir.offsets[i], dir.lengths[i]);
+        }
+        throw new IOException("PMTiles directory nested deeper than " + MAX_DIR_DEPTH
+                + " levels for tile id " + tileId);
     }
 
     public boolean isOpen() {
@@ -126,10 +238,12 @@ public final class PmtilesArchive {
         return header.maxZoom;
     }
 
-    /** Number of tile-id slots the directory covers (runs expanded). */
-    public long tileCount() {
+    /** Tile-id slots addressed by the ROOT directory (runs expanded). Excludes
+     * anything behind a leaf directory, so on a large archive it is a floor, not a
+     * total — it exists for diagnostics, not for logic. */
+    public long rootTileCount() {
         long total = 0;
-        for (long r : runs) {
+        for (long r : root.runs) {
             if (r > 0) {
                 total += r;
             }
@@ -138,14 +252,16 @@ public final class PmtilesArchive {
     }
 
     /**
-     * Does this archive hold a tile at {@code (z,x,y)}? Pure local lookup, no I/O.
+     * Does this archive hold a tile at {@code (z,x,y)}?
      *
-     * <p>This is the capability the bundled reader never exposed, and it is what
-     * removes the need to fetch-and-see. A caller can decide whether to descend,
-     * ascend, or skip entirely without spending a request.
+     * <p>Answers from the cached index without fetching the TILE, but it may fetch
+     * one leaf DIRECTORY the first time a region is asked about — which is why it
+     * throws. It used to promise "no I/O"; that promise was only keepable because
+     * the index was being treated as root-only, which is the defect this class now
+     * fixes.
      */
-    public boolean hasTile(int z, long x, long y) {
-        return indexOf(TileId.toTileId(z, x, y)) >= 0;
+    public boolean hasTile(int z, long x, long y) throws IOException {
+        return find(TileId.toTileId(z, x, y)) != null;
     }
 
     /**
@@ -157,11 +273,11 @@ public final class PmtilesArchive {
      * "present but empty".
      */
     public byte[] getTile(int z, long x, long y) throws IOException {
-        int i = indexOf(TileId.toTileId(z, x, y));
-        if (i < 0) {
+        long[] at = find(TileId.toTileId(z, x, y));
+        if (at == null) {
             return null;
         }
-        long len = lengths[i];
+        long len = at[1];
         if (len <= 0) {
             return null;
         }
@@ -169,29 +285,8 @@ public final class PmtilesArchive {
             throw new IOException("implausible tile length " + len + " at z" + z
                     + "/" + x + "/" + y);
         }
-        long from = header.tileDataOffset + offsets[i];
+        long from = header.tileDataOffset + at[0];
         return readRange(from, from + len - 1);
-    }
-
-    /** Index of the entry whose run covers {@code tileId}, or -1. */
-    private int indexOf(long tileId) {
-        if (starts == null) {
-            return -1;
-        }
-        int i = Arrays.binarySearch(starts, tileId);
-        if (i >= 0) {
-            return runs[i] > 0 ? i : -1;
-        }
-        // Not an exact start: the only candidate is the entry just before the
-        // insertion point, whose run may extend over this id (identical tiles are
-        // deduplicated into a single entry spanning several ids).
-        int cand = -i - 2;
-        if (cand < 0) {
-            return -1;
-        }
-        long start = starts[cand];
-        long run = runs[cand];
-        return (run > 0 && tileId >= start && tileId < start + run) ? cand : -1;
     }
 
     /**
