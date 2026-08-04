@@ -122,6 +122,91 @@ public final class ViewerApiClient {
     }
 
     /**
+     * What is actually IN the caller's org tilesets, per facing — existence, when
+     * the bake last wrote them, how many tiles they hold, the zoom range they
+     * declare, and the geographic extent they cover.
+     *
+     * <p>This is the question left when signing succeeds and the map still comes
+     * up empty, and it cannot be answered from the client side: a presigned range
+     * read of an archive that simply does not cover your area is indistinguishable
+     * from one that does but is empty there. {@code GET /backend/api/tiles/inspect}
+     * reads the PMTiles header server-side and reports it. Admin-only and scoped to
+     * the caller's own org from the JWT (same boundary as {@code /sign}), so a
+     * non-admin gets a 403 and that is reported as such rather than as a fault.
+     *
+     * @param lon,lat the position to test against each archive's declared bounds —
+     *                normally the current map centre, so the report can say
+     *                outright whether the area being looked at was ever baked.
+     *                Pass NaN to skip that test.
+     *                <p>Blocking; call OFF the EDT.
+     */
+    public static String describeTilesetInspection(double lon, double lat) {
+        String token = ViewerAuth.getInstance().getValidAccessToken();
+        if (token == null) {
+            return "skipped — no usable access token.";
+        }
+        try {
+            HttpClient.Response res = HttpClient
+                    .create(new URL(API_BASE + "tiles/inspect"))
+                    .setHeader("Authorization", "Bearer " + token)
+                    .setHeader("Accept", "application/json")
+                    .setConnectTimeout(CONNECT_TIMEOUT_MS)
+                    .setReadTimeout(READ_TIMEOUT_MS)
+                    .connect();
+            String content = res.fetchContent();
+            if (res.getResponseCode() != 200) {
+                JsonObject err = parseOrNull(content);
+                String detail = err == null ? content
+                        : err.getString("description", err.getString("error", content));
+                return "HTTP " + res.getResponseCode() + " — " + detail
+                        + (res.getResponseCode() == 403
+                            ? "  (this check is admin-only; not a fault if you are not an admin)"
+                            : "");
+            }
+            JsonObject root = parseOrNull(content);
+            JsonObject facings = root == null ? null : root.getJsonObject("facings");
+            if (facings == null) {
+                return "HTTP 200 but no \"facings\" in the response.";
+            }
+            StringBuilder b = new StringBuilder("HTTP 200 — org ")
+                    .append(root.getString("org_id", "(unknown)")).append('\n');
+            for (String facing : facings.keySet()) {
+                JsonObject f = facings.getJsonObject(facing);
+                b.append(String.format(Locale.ROOT, "    %-7s", facing));
+                if (!f.getBoolean("exists", false)) {
+                    b.append("NOT BAKED (")
+                     .append(f.getString("error", "absent"))
+                     .append(")\n");
+                    continue;
+                }
+                b.append("tiles=").append(f.containsKey("tile_entries")
+                        ? String.valueOf(f.getJsonNumber("tile_entries").longValue()) : "?")
+                 .append("  z").append(f.getInt("min_zoom", -1))
+                 .append("-").append(f.getInt("max_zoom", -1))
+                 .append("  baked ").append(f.getString("last_modified", "?"));
+                JsonArray bounds = f.getJsonArray("bounds");
+                if (bounds != null && bounds.size() == 4) {
+                    double w = bounds.getJsonNumber(0).doubleValue();
+                    double s = bounds.getJsonNumber(1).doubleValue();
+                    double e = bounds.getJsonNumber(2).doubleValue();
+                    double n = bounds.getJsonNumber(3).doubleValue();
+                    b.append(String.format(Locale.ROOT,
+                            "%n            covers lon[%.4f..%.4f] lat[%.4f..%.4f]", w, e, s, n));
+                    if (!Double.isNaN(lon) && !Double.isNaN(lat)) {
+                        boolean inside = lon >= w && lon <= e && lat >= s && lat <= n;
+                        b.append(inside ? "  <-- YOUR VIEW IS INSIDE THIS"
+                                        : "  <-- YOUR VIEW IS OUTSIDE THIS");
+                    }
+                }
+                b.append('\n');
+            }
+            return b.toString().trim();
+        } catch (IOException | RuntimeException ex) {
+            return "FAILED — " + ex;
+        }
+    }
+
+    /**
      * Read the first bytes of a public archive with no auth, so the report can
      * tell "the private path is broken" apart from "this machine cannot reach the
      * tile store at all". Blocking; call OFF the EDT.

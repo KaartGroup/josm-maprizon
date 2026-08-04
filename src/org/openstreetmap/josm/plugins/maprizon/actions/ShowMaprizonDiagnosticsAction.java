@@ -3,7 +3,9 @@
 package org.openstreetmap.josm.plugins.maprizon.actions;
 
 import org.openstreetmap.josm.actions.JosmAction;
+import org.openstreetmap.josm.data.coor.LatLon;
 import org.openstreetmap.josm.gui.MainApplication;
+import org.openstreetmap.josm.gui.MapFrame;
 import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient;
 import org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth;
 import org.openstreetmap.josm.tools.ImageProvider;
@@ -50,19 +52,39 @@ public class ShowMaprizonDiagnosticsAction extends JosmAction {
 
     @Override
     public void actionPerformed(ActionEvent e) {
+        // Read the map centre HERE, on the EDT, and carry it into the worker: the
+        // report tests it against each baked archive's extent, which is what turns
+        // "no imagery appeared" into "this area was never baked".
+        double lon = Double.NaN;
+        double lat = Double.NaN;
+        MapFrame map = MainApplication.getMap();
+        if (map != null && map.mapView != null) {
+            LatLon centre = map.mapView.getRealBounds().getCenter();
+            lon = centre.lon();
+            lat = centre.lat();
+        }
+        final double vlon = lon;
+        final double vlat = lat;
         // Off the EDT: this makes real network calls (and may refresh a token).
         new Thread(() -> {
-            String report = buildReport();
+            String report = buildReport(vlon, vlat);
             SwingUtilities.invokeLater(() -> show(report));
         }, "maprizon-diagnostics").start();
     }
 
-    private static String buildReport() {
+    private static String buildReport(double lon, double lat) {
         StringBuilder b = new StringBuilder();
         ViewerAuth auth = ViewerAuth.getInstance();
 
         b.append("MAPRIZON DIAGNOSTICS\n");
         b.append("====================\n\n");
+
+        b.append("MAP VIEW\n");
+        b.append("  centre ............ ").append(
+                Double.isNaN(lon) ? "(no map open)"
+                        : String.format(java.util.Locale.ROOT, "%.6f, %.6f  (lon, lat)", lon, lat))
+         .append('\n');
+        b.append('\n');
 
         b.append("LOGIN\n");
         b.append("  logged in ......... ").append(auth.isLoggedIn()).append('\n');
@@ -76,6 +98,14 @@ public class ShowMaprizonDiagnosticsAction extends JosmAction {
             b.append("  skipped — not logged in.\n");
         } else {
             b.append("  ").append(ViewerApiClient.describeSignAttempt()).append('\n');
+        }
+        b.append('\n');
+
+        b.append("YOUR ORG'S BAKED TILESETS  (GET /backend/api/tiles/inspect)\n");
+        if (!auth.isLoggedIn()) {
+            b.append("  skipped — not logged in.\n");
+        } else {
+            b.append("  ").append(ViewerApiClient.describeTilesetInspection(lon, lat)).append('\n');
         }
         b.append('\n');
 
@@ -93,8 +123,12 @@ public class ShowMaprizonDiagnosticsAction extends JosmAction {
         b.append("      -> the login itself is being rejected (expired, or the token is\n");
         b.append("         not valid for this backend). Log out and back in.\n");
         b.append("  * private 200 but no imagery on the map\n");
-        b.append("      -> signing works; the org's tileset is empty or unbaked for the\n");
-        b.append("         area you are looking at.\n");
+        b.append("      -> signing works. Read the tileset section: 'YOUR VIEW IS\n");
+        b.append("         OUTSIDE THIS' means the bake does not cover where you are\n");
+        b.append("         looking, and 'baked <date>' says how old it is. Imagery\n");
+        b.append("         uploaded since the last nightly bake is NOT in these files\n");
+        b.append("         yet — the web viewer shows it early via a live endpoint the\n");
+        b.append("         plugin does not use, so the two legitimately disagree.\n");
         b.append("  * public FAILS too -> network/proxy problem, not a login problem.\n");
         return b.toString();
     }
