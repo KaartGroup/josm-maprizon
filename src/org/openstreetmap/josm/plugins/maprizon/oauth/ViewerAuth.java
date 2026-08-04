@@ -228,6 +228,42 @@ public final class ViewerAuth {
         }
     }
 
+    /**
+     * Which organization claim the current access token actually carries, and
+     * whether it has expired — for the diagnostic shown when {@code /tiles/sign}
+     * refuses us. Values are not exposed beyond the org id, which the UI already
+     * displays; this reports PRESENCE, which is the part that decides the outcome.
+     *
+     * <p>It matters because the plugin and the server read DIFFERENT claims. This
+     * class accepts Auth0's native {@code org_id} or the custom
+     * {@code mikro/org_id}, while the server's {@code _require_org_id()} reads
+     * {@code org_id} alone. A token carrying only the custom claim therefore looks
+     * org-scoped here and org-less there: the plugin asks for private tiles, the
+     * server answers 403 "no organization on token", and the user is told nothing.
+     * If that is what is happening, this line says so outright.
+     */
+    public String orgClaimSummary() {
+        String jwt;
+        long expiresAt;
+        synchronized (stateLock) {
+            jwt = accessToken;
+            expiresAt = expiresAtEpochSeconds;
+        }
+        if (jwt.isEmpty()) {
+            return "no access token";
+        }
+        JsonObject claims = jwtPayload(jwt);
+        if (claims == null) {
+            return "token payload unreadable";
+        }
+        boolean nativeOrg = !claims.getString("org_id", "").isEmpty();
+        boolean customOrg = !claims.getString("mikro/org_id", "").isEmpty();
+        long now = System.currentTimeMillis() / 1000L;
+        return "token org_id=" + (nativeOrg ? "present" : "ABSENT")
+                + ", mikro/org_id=" + (customOrg ? "present" : "absent")
+                + ", expired=" + (expiresAt > 0 && now >= expiresAt);
+    }
+
     /** Forget all credentials. Fires a state-change so callers can refresh UI/imagery. */
     public void logout() {
         synchronized (stateLock) {
@@ -418,16 +454,8 @@ public final class ViewerAuth {
      * Returns null if the token is absent/unparseable or carries no org claim.
      */
     private static String orgIdFromJwt(String jwt) {
-        if (jwt == null || jwt.isEmpty()) {
-            return null;
-        }
-        String[] parts = jwt.split("\\.");
-        if (parts.length < 2) {
-            return null;
-        }
+        JsonObject claims = jwtPayload(jwt);
         try {
-            byte[] payload = Base64.getUrlDecoder().decode(parts[1]);
-            JsonObject claims = parse(new String(payload, StandardCharsets.UTF_8));
             if (claims == null) {
                 return null;
             }
@@ -438,6 +466,25 @@ public final class ViewerAuth {
             return org.isEmpty() ? null : org;
         } catch (RuntimeException e) {
             Logging.warn("Maprizon: could not read org_id from token: " + e);
+            return null;
+        }
+    }
+
+    /** Decoded (UNVERIFIED — see {@link #orgIdFromJwt}) payload of a JWT we were
+     * issued ourselves, or null if it is absent or unparseable. */
+    private static JsonObject jwtPayload(String jwt) {
+        if (jwt == null || jwt.isEmpty()) {
+            return null;
+        }
+        String[] parts = jwt.split("\\.");
+        if (parts.length < 2) {
+            return null;
+        }
+        try {
+            byte[] payload = Base64.getUrlDecoder().decode(parts[1]);
+            return parse(new String(payload, StandardCharsets.UTF_8));
+        } catch (RuntimeException e) {
+            Logging.warn("Maprizon: could not decode token payload: " + e);
             return null;
         }
     }

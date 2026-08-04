@@ -78,6 +78,26 @@ public final class ViewerApiClient {
     }
 
     /**
+     * Why the last {@link #signedTileUrls()} call produced nothing — the HTTP
+     * status and the server's own words, plus which org claim the token actually
+     * carries.
+     *
+     * <p>This exists because the failure is otherwise undiagnosable from outside.
+     * Every failure path here returns {@code null} on purpose so the caller can
+     * fall back to public tiles, and for a long time the reason went only to a
+     * debug log that is off by default. The user-visible symptom of all of them is
+     * identical — "private imagery doesn't load" — while the causes (expired
+     * token, org missing from the token, unbaked tileset, server error) need
+     * completely different fixes.
+     */
+    private static volatile String lastSignFailure;
+
+    /** @return the reason the last sign attempt failed, or null if none has. */
+    public static String lastSignFailure() {
+        return lastSignFailure;
+    }
+
+    /**
      * Fetch presigned URLs for the logged-in user's per-org baked PMTiles.
      *
      * <p>Why this exists: the per-org tilesets became PRIVATE in Spaces on
@@ -102,6 +122,8 @@ public final class ViewerApiClient {
     public static SignedTileUrls signedTileUrls() {
         String token = ViewerAuth.getInstance().getValidAccessToken();
         if (token == null) {
+            lastSignFailure = "no usable access token (login expired or refresh failed)";
+            Logging.warn("Maprizon: " + lastSignFailure);
             return null; // anonymous: caller uses the public, unsigned bake
         }
         try {
@@ -115,9 +137,24 @@ public final class ViewerApiClient {
             if (res.getResponseCode() != 200) {
                 // Two different error shapes reach here: the auth layer returns
                 // {"code","description"} (401/403) while the endpoint itself
-                // returns {"error"} (403 no-org, 500 signing failure). Log the
-                // status; the body is not needed to decide what to do (fall back).
-                Logging.warn("Maprizon: tiles/sign returned HTTP " + res.getResponseCode());
+                // returns {"error"} (403 no-org, 500 signing failure). BOTH are
+                // reported verbatim now — "403 no organization on token" and
+                // "401 token expired" are opposite problems and used to be the
+                // same silent fallback.
+                String body = "";
+                try {
+                    body = String.valueOf(res.fetchContent());
+                } catch (IOException ignored) {
+                    // The status is the useful part; a body we cannot read is not
+                    // worth failing the diagnosis over.
+                }
+                JsonObject err = parseOrNull(body);
+                String detail = err == null ? body
+                        : err.getString("description", err.getString("error", body));
+                lastSignFailure = "tiles/sign returned HTTP " + res.getResponseCode()
+                        + (detail == null || detail.isEmpty() ? "" : ": " + detail)
+                        + " [" + ViewerAuth.getInstance().orgClaimSummary() + "]";
+                Logging.warn("Maprizon: " + lastSignFailure);
                 return null;
             }
             try (JsonReader reader = Json.createReader(
@@ -125,7 +162,8 @@ public final class ViewerApiClient {
                 JsonObject root = reader.readObject();
                 JsonObject urlsObj = root.getJsonObject("urls");
                 if (urlsObj == null) {
-                    Logging.warn("Maprizon: tiles/sign response had no \"urls\" object");
+                    lastSignFailure = "tiles/sign response had no \"urls\" object";
+                    Logging.warn("Maprizon: " + lastSignFailure);
                     return null;
                 }
                 Map<String, String> urls = new HashMap<>();
@@ -136,7 +174,8 @@ public final class ViewerApiClient {
                     }
                 }
                 if (urls.isEmpty()) {
-                    Logging.warn("Maprizon: tiles/sign returned no usable URLs");
+                    lastSignFailure = "tiles/sign returned no usable URLs";
+                    Logging.warn("Maprizon: " + lastSignFailure);
                     return null;
                 }
                 // The server signs every facing it knows about (currently six,
@@ -150,13 +189,16 @@ public final class ViewerApiClient {
                 JsonNumber expiresNum = root.getJsonNumber("expiresAt");
                 long expiresAt = expiresNum != null ? expiresNum.longValue() : 0L;
                 if (expiresAt <= 0L) {
-                    Logging.warn("Maprizon: tiles/sign response had no usable expiresAt");
+                    lastSignFailure = "tiles/sign response had no usable expiresAt";
+                    Logging.warn("Maprizon: " + lastSignFailure);
                     return null;
                 }
+                lastSignFailure = null; // success
                 return new SignedTileUrls(urls, expiresAt);
             }
         } catch (IOException | RuntimeException e) {
-            Logging.warn("Maprizon: tiles/sign failed, falling back to public tiles: " + e);
+            lastSignFailure = "tiles/sign request failed: " + e;
+            Logging.warn("Maprizon: " + lastSignFailure + ", falling back to public tiles");
             return null;
         }
     }
@@ -358,6 +400,20 @@ public final class ViewerApiClient {
             }
         } catch (IOException | RuntimeException e) {
             Logging.warn("Maprizon: fetchAdjacentSequence failed: " + e);
+            return null;
+        }
+    }
+
+    /** Parse a JSON object, or null if the text is absent/not an object. Used for
+     * ERROR bodies, where the shape varies by which layer rejected the request. */
+    private static JsonObject parseOrNull(String content) {
+        if (content == null || content.isEmpty()) {
+            return null;
+        }
+        try (JsonReader reader = Json.createReader(
+                new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)))) {
+            return reader.readObject();
+        } catch (RuntimeException e) {
             return null;
         }
     }
