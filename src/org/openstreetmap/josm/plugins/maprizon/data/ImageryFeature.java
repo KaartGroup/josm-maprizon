@@ -32,12 +32,28 @@ public final class ImageryFeature {
      * geometry and its full-resolution replacement never render on top of each
      * other. {@link #NATIVE_ZOOM} for non-tile features. */
     private final int sourceZoom;
+    /**
+     * Slippy zoom this feature was REQUESTED at — which, unlike {@link #sourceZoom},
+     * identifies the tile grid it was clipped into and therefore the ground it
+     * speaks for. The layer's level-of-detail filter needs this rather than the
+     * decoded zoom: two tiles requested together at z16 can resolve to different
+     * ancestors (z16 here, z15 in a gap), and comparing decoded zooms would throw
+     * away the gap's data even though nothing finer exists for it.
+     * {@link #NATIVE_ZOOM} for non-tile features.
+     */
+    private final int requestZoom;
 
     public ImageryFeature(List<double[]> points, Map<String, Object> properties, String facing) {
         this(points, properties, facing, NATIVE_ZOOM);
     }
 
     public ImageryFeature(List<double[]> points, Map<String, Object> properties, String facing, int sourceZoom) {
+        this(points, properties, facing, sourceZoom, NATIVE_ZOOM);
+    }
+
+    public ImageryFeature(List<double[]> points, Map<String, Object> properties, String facing,
+                          int sourceZoom, int requestZoom) {
+        this.requestZoom = requestZoom;
         this.points = Collections.unmodifiableList(points);
         this.properties = properties == null ? Collections.emptyMap() : properties;
         // Single chokepoint: every facing is normalized to lowercase here, so all
@@ -62,6 +78,18 @@ public final class ImageryFeature {
      * for non-tile (API) features. See the field doc. */
     public int getSourceZoom() {
         return sourceZoom;
+    }
+
+    /** Slippy zoom this feature was requested at; {@link #NATIVE_ZOOM} for
+     * non-tile (API) features. See the field doc. */
+    public int getRequestZoom() {
+        return requestZoom;
+    }
+
+    /** Copy carrying the requested zoom, stamped once the overzoom walk has
+     * settled which requested tile these features belong to. */
+    public ImageryFeature withRequestZoom(int zoom) {
+        return new ImageryFeature(points, properties, facing, sourceZoom, zoom);
     }
 
     public String getSequenceId() {

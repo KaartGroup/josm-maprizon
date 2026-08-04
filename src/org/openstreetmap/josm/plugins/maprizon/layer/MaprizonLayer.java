@@ -125,10 +125,19 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * Display slippy zoom at/above which the layer is in "detail" mode: every
      * enabled facing renders, but ONLY at its finest fetched resolution, and
      * auto-download is allowed. Below it ("overview", zoomed out) a single facing
-     * renders and auto-download is suppressed. Chosen as roughly the zoom where
-     * individual image points separate on screen. Tunable.
+     * renders and auto-download is suppressed.
+     *
+     * <p><b>Was 16, which is why the plugin appeared to load only 360.</b> The gate
+     * gets applied to the DOWNLOAD planner as well as to paint (see
+     * {@link #facingRendersAt}), so below it nothing but {@link #OVERVIEW_FACING}
+     * is even fetched. z16 is deep — a JOSM window at z16 spans a couple of city
+     * blocks — so ordinary work at z14/z15 sat in "overview" and saw one facing,
+     * with no indication that four others existed. z14 is roughly where a sequence
+     * stops being a single stroke and the facings become worth telling apart, and
+     * the tile cost there is small (the public bake holds ~120 tiles at z14 for the
+     * whole dataset, vs ~766 at z16). Tunable.
      */
-    private static final int USABLE_ZOOM = 16;
+    private static final int USABLE_ZOOM = 14;
 
     /** The one facing shown in overview (zoomed-out) mode — 360 is the most
      * representative of overall coverage. */
@@ -170,7 +179,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "1.0.2";
+    private static final String BUILD_TAG = "1.0.3";
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -218,10 +227,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * download. -1 = none yet. */
     private volatile double lastAutoLonSpan = -1;
 
-    /** Finest tile zoom among all stored features (-1 = none yet). In detail mode
-     * the paint filter shows only features at this zoom, hiding coarse overzoom
-     * leftovers. EDT-updated in {@link #merge}; volatile so paint reads it safely. */
-    private volatile int maxStoredSourceZoom = -1;
+    /**
+     * NOTE ON LEVEL OF DETAIL. There is deliberately no stored "finest zoom"
+     * number any more. It used to be one layer-wide integer, and every feature
+     * whose decoded zoom fell below it stopped drawing — which threw away real
+     * coverage two different ways: a facing baked shallower than the others (the
+     * public {@code still} archive stops at z13 while the drive facings reach z16)
+     * was hidden everywhere and permanently, and an area downloaded at a coarse
+     * zoom went blank as soon as any other area was downloaded at a finer one.
+     * The replacement asks the precise question instead, per feature, against the
+     * tile ledger — see {@link #finerDataFetchedOver}.
+     */
 
     // Debounced auto-download (opt-in live mode). All EDT.
     private Timer autoDebounceTimer;
@@ -309,12 +325,39 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return "Maprizon Coverage — public imagery only";
     }
 
-    /** Login/logout: drop coverage (the set of scopes it was fetched under just
-     * changed) AND relabel, so the layer never claims to hold a dataset it no
-     * longer has — nor omits one it can now see. */
+    /**
+     * Login/logout: bring the layer in line with the scopes now readable, and
+     * relabel, so it never claims to hold a dataset it no longer has — nor omits
+     * one it can now see.
+     *
+     * <p><b>Logging IN no longer wipes the map.</b> It used to call
+     * {@link #clearCoverage()} unconditionally, so the instant you logged in every
+     * public feature on screen vanished and stayed gone until you noticed and
+     * re-ran the download by hand. That is indistinguishable from the bug where
+     * logging in genuinely hid public imagery, and it was reported as exactly
+     * that. Logging in only ADDS a scope — every feature already drawn is still
+     * readable — so the features stay, the tile ledger is dropped (those tiles
+     * were fetched without the org bake and must be re-probed to pick it up), and
+     * the current view re-downloads on its own so the org's coverage appears
+     * without a second trip to the menu.
+     *
+     * <p>Logging OUT does still clear: features are not tagged with the scope they
+     * came from, so the org's imagery cannot be told apart from the public
+     * imagery once merged, and it must not stay on screen after the credential is
+     * gone. The follow-up download repaints the public half within a second.
+     */
     private void onAuthChanged() {
-        clearCoverage();
+        boolean loggedIn = ViewerAuth.getInstance().isLoggedIn();
+        if (loggedIn) {
+            // Keep the features; force every tile to be re-probed under the new
+            // scope set. clearLedgers() is the part of clearCoverage() that is
+            // actually required here.
+            clearLedgers();
+        } else {
+            clearCoverage();
+        }
         setName(audienceLayerName());
+        redownloadCurrentViewQuietly();
         // Tell the user AT LOGIN if the login bought them nothing, instead of
         // letting them discover it as "no coverage anywhere" a few downloads later.
         // A reporter hit exactly that: logged in, added the layer, and saw imagery
@@ -366,7 +409,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
         // individual image points).
         int rawZoom = rawScreenZoom(bbox, mv.getWidth());
         boolean detailMode = rawZoom >= USABLE_ZOOM;
-        int maxSourceZoom = maxStoredSourceZoom;
 
         // Live mode (opt-in): re-download when the view meaningfully moved/zoomed —
         // but ONLY in detail mode (so a zoomed-out pan never triggers a coarse
@@ -389,7 +431,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
             }
             float offsetPx = facingOffsetPx(entry.getKey());
             for (ImageryFeature feature : entry.getValue()) {
-                if (!lodVisible(feature, detailMode, maxSourceZoom)) {
+                if (!lodVisible(feature, detailMode)) {
                     continue;
                 }
                 paintCasing(g, mv, feature, offsetPx);
@@ -402,7 +444,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
             Color color = FacingStyle.colorFor(entry.getKey());
             float offsetPx = facingOffsetPx(entry.getKey());
             for (ImageryFeature feature : entry.getValue()) {
-                if (!lodVisible(feature, detailMode, maxSourceZoom)) {
+                if (!lodVisible(feature, detailMode)) {
                     continue;
                 }
                 paintColor(g, mv, feature, color, offsetPx);
@@ -673,20 +715,49 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     /** Drop all downloaded coverage (start fresh). */
     public void clearCoverage() {
-        loadedTileKeys.clear();
-        // Also drop the negative cache, so "Clear downloaded coverage" is the one
-        // action that makes the layer re-probe EVERYTHING — including ground that
-        // was empty last time but may have been baked since.
-        emptyTileKeys.clear();
+        clearLedgers();
         storedFeatureKeys.clear();
         featuresByFacing = new HashMap<>();
+        invalidate();
+    }
+
+    /**
+     * Forget which tiles have been fetched, WITHOUT discarding the features
+     * already drawn — the half of {@link #clearCoverage()} that a login needs.
+     *
+     * <p>Both ledgers go, including the negative cache, so the next download
+     * re-probes everything: ground that was empty under one scope set can hold
+     * imagery under another (and ground that was empty last week may have been
+     * baked since, which is what makes "Clear downloaded coverage" honest).
+     */
+    private void clearLedgers() {
+        loadedTileKeys.clear();
+        emptyTileKeys.clear();
         lastAutoBounds = null;
         lastAutoLonSpan = -1;
-        maxStoredSourceZoom = -1;
+        // Re-resolve the archive zoom range as well: it is latched after the first
+        // successful header read, and an auth change swaps which archives that
+        // range came from. refreshZoomBounds() re-reads it on the loader thread at
+        // the start of the next download.
+        zoomBoundsResolved = false;
         if (autoDebounceTimer != null) {
             autoDebounceTimer.stop();
         }
-        invalidate();
+    }
+
+    /**
+     * Re-fetch the current view with no prompts and no result dialogs — used after
+     * a login/logout, where the user asked to change audience, not to run a
+     * download. The tile budget still applies (a huge view silently fetches
+     * nothing rather than stalling); an explicit download will say so properly.
+     */
+    private void redownloadCurrentViewQuietly() {
+        MapFrame map = MainApplication.getMap();
+        if (map == null || map.mapView == null) {
+            return;
+        }
+        MapView mv = map.mapView;
+        submitDownload(mv.getRealBounds(), mv.getWidth(), true, false);
     }
 
     /**
@@ -788,7 +859,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
                 if (enforceBudget && totalNewTiles > MAX_TILES_PER_DOWNLOAD) {
                     final long tooMany = totalNewTiles;
-                    SwingUtilities.invokeLater(() -> showTooLarge(tooMany));
+                    // Only the user's own download gets a dialog about it. The
+                    // post-login refresh enforces the same budget but must not
+                    // throw a modal at someone who just pressed "Log in".
+                    if (userInitiated) {
+                        SwingUtilities.invokeLater(() -> showTooLarge(tooMany));
+                    } else {
+                        diag("budget exceeded (" + tooMany + " tiles), skipping quiet download");
+                    }
                     return;
                 }
 
@@ -946,10 +1024,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 if (storedFeatureKeys.add(featureKey(e.getKey(), f))) {
                     combined.add(f);
                     added++;
-                    if (f.getSourceZoom() != ImageryFeature.NATIVE_ZOOM
-                            && f.getSourceZoom() > maxStoredSourceZoom) {
-                        maxStoredSourceZoom = f.getSourceZoom();
-                    }
                 }
             }
             next.put(e.getKey(), combined);
@@ -1097,7 +1171,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
         // clip-to-zero and any placement surprises. One line per fetched tile.
         diag("  ozoom scope=" + scope + " facing=" + facing + " req z" + zoom + "/" + tx + "/" + ty
                 + " levels[" + presence.toString().trim() + "] wonZ=" + bestZoom + " kept=" + best.size());
-        return best;
+        // Stamp the REQUESTED zoom now that the walk has settled: this is the tile
+        // grid these features were clipped into, and the level-of-detail filter
+        // reasons about that grid rather than about which ancestor happened to
+        // serve them (see finerDataFetchedOver).
+        List<ImageryFeature> stamped = new ArrayList<>(best.size());
+        for (ImageryFeature f : best) {
+            stamped.add(f.withRequestZoom(zoom));
+        }
+        return stamped;
     }
 
     /** Bounds of slippy tile (zoom, x, y) as {west, south, east, north}. */
@@ -1217,16 +1299,60 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /**
      * Level-of-detail paint filter. Overview (zoomed out, {@code !detailMode}): only
      * the single {@link #OVERVIEW_FACING} renders, to cut clutter. Detail (zoomed
-     * in): every enabled facing renders but ONLY at the finest fetched zoom
-     * ({@code maxSourceZoom}), so coarse overzoom geometry stops rendering beneath
-     * its full-resolution replacement. {@code maxSourceZoom < 0} means nothing has
-     * been stored yet (show whatever exists).
+     * in): every enabled facing renders, except where a FINER request has already
+     * been fetched over that feature's own ground ({@link #finerDataFetchedOver}),
+     * so coarse overzoom geometry stops drawing beneath its full-resolution
+     * replacement — and nothing else is suppressed.
      */
-    private boolean lodVisible(ImageryFeature f, boolean detailMode, int maxSourceZoom) {
+    private boolean lodVisible(ImageryFeature f, boolean detailMode) {
         if (!facingRendersAt(f.getFacing(), detailMode)) {
             return false;
         }
-        return maxSourceZoom < 0 || f.getSourceZoom() >= maxSourceZoom;
+        return !finerDataFetchedOver(f);
+    }
+
+    /**
+     * Has a FINER request already been fetched over this feature's own ground?
+     * That, and only that, is when a coarse feature must stop drawing — its
+     * full-resolution replacement is present and the two would render on top of
+     * each other (the ragged-zigzag report).
+     *
+     * <p>The test walks the tile grid at each zoom finer than the feature's
+     * request zoom and asks the ledger whether that tile was fetched AND produced
+     * features. Exact, and it is exact in both directions:
+     * <ul>
+     *   <li>A z16 download whose tile had no z16 data resolves to a z15 ancestor.
+     *       Its features are still the only thing covering that ground, and they
+     *       keep drawing — a rule comparing DECODED zooms would have hidden them
+     *       behind the native-z16 tiles next door.</li>
+     *   <li>Coverage downloaded at z14 five kilometres away is untouched by a z16
+     *       download here, because no finer tile covers ITS ground.</li>
+     * </ul>
+     *
+     * <p>Only {@link #loadedTileKeys} counts, never the empty-tile cache: a finer
+     * tile that came back empty has nothing to replace the coarse geometry with,
+     * and treating it as a replacement would erase real coverage.
+     *
+     * <p>Cost is (archiveMax − requestZoom) hash lookups per feature — one or two
+     * in practice, since features are requested at the zoom being looked at.
+     */
+    private boolean finerDataFetchedOver(ImageryFeature f) {
+        int requested = f.getRequestZoom();
+        if (requested == ImageryFeature.NATIVE_ZOOM) {
+            return false; // API-sourced frames are never superseded by tiles
+        }
+        List<double[]> pts = f.getPoints();
+        if (pts.isEmpty()) {
+            return false;
+        }
+        double[] p = pts.get(0);
+        for (int z = requested + 1; z <= archiveMaxZoom(); z++) {
+            int[] t = TileMath.lonLatToTile(p[0], p[1], z);
+            if (loadedTileKeys.contains(tileKey(f.getFacing(), z, t[0], t[1]))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1237,11 +1363,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * <p>It exists because those two disagreed. Paint has always shown only
      * {@link #OVERVIEW_FACING} when zoomed out, but the download fetched every
      * enabled facing regardless — so an overview download pulled all five
-     * facings to render one. That is not a useful pre-fetch either:
-     * {@link #maxStoredSourceZoom} is a single layer-wide monotonic maximum, so
-     * the first detail download anywhere in the session raises it above those
-     * coarse features and {@link #lodVisible} hides them permanently. They stay
-     * in memory, cost merge/dedup time, and never paint again.
+     * facings to render one. It is a poor pre-fetch too: a later detail download
+     * over the same ground supersedes those coarse features (see
+     * {@link #finerDataFetchedOver}), after which they stay in memory, cost
+     * merge/dedup time, and never paint again.
      *
      * <p>Keeping the rule in one place is the point: if the overview policy
      * changes, paint and download cannot drift apart again.
