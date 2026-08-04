@@ -7,7 +7,7 @@
     <property name="plugin.main.version" value="19481"/>
     <!-- Plugin version: shown in the plugin manager and used by JOSM's external
          update check. BUMP THIS ON EVERY RELEASE (semantic versioning). -->
-    <property name="plugin.version" value="1.0.7"/>
+    <property name="plugin.version" value="1.0.8"/>
 
     <!-- Configure these properties (replace "..." accordingly).
          See https://josm.openstreetmap.de/wiki/DevelopersGuide/DevelopingPlugins

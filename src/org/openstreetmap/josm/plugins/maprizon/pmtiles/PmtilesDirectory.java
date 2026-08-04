@@ -14,12 +14,17 @@ import java.util.List;
  * Minimal PMTiles v3 header + root-directory decoder: answers "which tiles exist
  * in this archive" WITHOUT fetching or decoding a single tile.
  *
- * <p><b>Why this is worth having.</b> Measured against the live public archives on
+ * <p><b>Why this is worth having.</b> Measured against the live PUBLIC archives on
  * 2026-07-29: each per-facing archive holds ~1300 tiles across z3–z16, its root
- * directory is ~3.2 KB, and {@code leaf_dirs_length} is <b>0</b> — so the ENTIRE
- * tile index arrives in one small range read. The whole public dataset's
- * availability index is ~17 KB and needs no tile decoding. That is what makes a
- * pre-download coverage display cheap enough to run on layer add.
+ * directory is ~3.2 KB, and {@code leaf_dirs_length} is <b>0</b> — so that entire
+ * tile index arrives in one small range read, needing no tile decoding, which is
+ * what makes a pre-download coverage display cheap enough to run on layer add.
+ *
+ * <p><b>Do not generalize that measurement.</b> It was taken on the smallest
+ * archives the plugin reads and was then treated as true of all of them; an
+ * organization's full bake is far larger and keeps most of its index in LEAF
+ * DIRECTORIES. {@code PmtilesArchive} follows those; the helpers here that stop at
+ * the root say so individually.
  *
  * <p>The bundled reader cannot do this for us: {@code Reader$Directory},
  * {@code Reader.getZoomOffset} and {@code Util.decompress} are all
@@ -86,10 +91,10 @@ public final class PmtilesDirectory {
             this.tileEntries = tileEntries;
         }
 
-        /** True when the whole index is in the root directory, so one range read
-         * is sufficient. Every current Maprizon archive satisfies this; a future
-         * larger bake might not, and the caller must not silently show partial
-         * coverage if so. */
+        /** True when the whole index is in the root directory, so one range read is
+         * sufficient. The public per-facing bakes satisfy this; an organization's
+         * bake does NOT — it is mostly leaf directories, and a caller that stops at
+         * the root sees almost none of it. */
         public boolean isFullyInRoot() {
             return leafDirsLength == 0;
         }
@@ -225,9 +230,12 @@ public final class PmtilesDirectory {
      * Expand entries into the set of tile ids that actually hold data.
      *
      * <p>Leaf-directory entries ({@code runLength == 0}) are skipped: they address
-     * more directory, not tiles, and following them would need a second fetch.
-     * {@link Header#isFullyInRoot()} is how a caller checks whether skipping them
-     * loses anything — for every current Maprizon archive it does not.
+     * more directory, not tiles, and following them would need a second fetch. So
+     * on an archive with leaves this returns a SUBSET — everything the root happens
+     * to address directly. That is fine for the diagnostics this serves and wrong
+     * for anything that must answer "does this tile exist"; use
+     * {@code PmtilesArchive.hasTile}, which walks into the leaves.
+     * {@link Header#isFullyInRoot()} tells a caller which situation it is in.
      *
      * @param maxIds hard cap so a malformed or unexpectedly huge run cannot
      *               exhaust memory; the count is bounded in practice by the
