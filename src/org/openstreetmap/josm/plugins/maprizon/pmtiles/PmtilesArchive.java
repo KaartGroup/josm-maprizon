@@ -142,10 +142,12 @@ public final class PmtilesArchive {
         this.root = readDir(h, h.rootOffset, h.rootLength, "root directory");
         this.header = h;
 
-        if (!h.isFullyInRoot()) {
-            Logging.info("Maprizon: " + redact(url) + " uses leaf directories ("
-                    + h.leafDirsLength + " bytes); they will be followed on demand");
-        }
+        org.openstreetmap.josm.plugins.maprizon.MaprizonLog.info("opened " + redact(url)
+                + " z" + h.minZoom + "-" + h.maxZoom
+                + " rootEntries=" + root.starts.length
+                + " rootTiles=" + rootTileCount()
+                + " leafDirs=" + h.leafDirsLength + "B"
+                + (h.isFullyInRoot() ? "" : " (followed on demand)"));
     }
 
     /** Range-read, decompress and decode one directory. */
