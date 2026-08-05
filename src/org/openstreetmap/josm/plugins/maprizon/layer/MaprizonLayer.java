@@ -178,7 +178,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "1.0.9";
+    private static final String BUILD_TAG = "1.0.10";
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -218,6 +218,16 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     /** Opt-in live behavior: re-download around the view as it changes. Off by default. */
     private volatile boolean autoRefresh = false;
+    /**
+     * Deepest request zoom whose data this layer already holds, or -1. Drives the
+     * automatic zoom refresh: coverage downloaded at z12 and then looked at from
+     * z17 was drawn from z12 geometry — tippecanoe-simplified to right angles with
+     * one clickable node per corner — and nothing ever upgraded it, because zoom
+     * deliberately never triggered a fetch. Now a zoom PAST this value refines what
+     * is on screen. Zooming back out needs nothing: fine geometry draws correctly
+     * at any coarser zoom.
+     */
+    private volatile int refinedToZoom = -1;
     private volatile Bounds lastAutoBounds;
     /** Longitude span of the last auto-load view, used to tell a PAN (extent
      * unchanged, centre moved) from a ZOOM (extent changed). Rounded integer zoom
@@ -242,6 +252,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private Timer autoDebounceTimer;
     private Bounds pendingAutoBounds;
     private int pendingAutoWidth;
+    /** True when the pending debounced load is a zoom refresh (sharpen only). */
+    private boolean pendingRefineOnly;
 
     // Loading-spinner animation. All EDT.
     private Timer busyTicker;
@@ -416,6 +428,20 @@ public class MaprizonLayer extends Layer implements MouseListener {
         // area-too-large prompt.
         if (autoRefresh && detailMode && !loading.get() && autoViewChanged(bbox, mv)) {
             scheduleAutoDownload(bbox, mv.getWidth());
+        }
+
+        // ZOOM REFRESH. Not part of live mode, and not optional: without it the
+        // tracks are frozen at whatever zoom they were downloaded at. Download at
+        // z12 and zoom to z17 and you are still looking at z12 geometry — right
+        // angles, one clickable image per corner — with no way to tell that finer
+        // data exists. This fires only when the screen has gone DEEPER than
+        // anything held, is debounced like a pan, and refines ONLY ground already
+        // downloaded, so it sharpens the view without ever widening coverage.
+        if (!loading.get() && !featuresByFacing.isEmpty()) {
+            int wanted = screenZoom(bbox, mv.getWidth());
+            if (wanted > refinedToZoom) {
+                scheduleAutoDownload(bbox, mv.getWidth(), true);
+            }
         }
 
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -717,6 +743,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         clearLedgers();
         storedFeatureKeys.clear();
         featuresByFacing = new HashMap<>();
+        refinedToZoom = -1;
         invalidate();
     }
 
@@ -770,6 +797,19 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * @param userInitiated  true to surface an empty/too-large result to the user.
      */
     private void submitDownload(Bounds bbox, int widthPx, boolean enforceBudget, boolean userInitiated) {
+        submitDownload(bbox, widthPx, enforceBudget, userInitiated, false);
+    }
+
+    /**
+     * @param refineOnly fetch ONLY where coverage was already downloaded at a
+     *                   coarser zoom — sharpen what is on screen, never widen it.
+     *                   This is what keeps the automatic zoom refresh faithful to
+     *                   the explicit-download model: it re-serves ground the user
+     *                   asked for, at the resolution they are now looking at, and
+     *                   never pulls in an area they did not ask for.
+     */
+    private void submitDownload(Bounds bbox, int widthPx, boolean enforceBudget, boolean userInitiated,
+                                boolean refineOnly) {
         if (!loading.compareAndSet(false, true)) {
             return;
         }
@@ -793,6 +833,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // the native z15 tile per requested tile: full-resolution geometry,
                 // clipped losslessly by bbox, matching what the web viewer renders.
                 int zoom = screenZoom(view, widthPx);
+                if (refineOnly) {
+                    // Record the ATTEMPT, not the success. Every early return below
+                    // (nothing renderable, over budget) would otherwise leave the
+                    // trigger armed, and paint() would re-schedule this on every
+                    // repaint for as long as the view stayed put.
+                    if (zoom > refinedToZoom) {
+                        refinedToZoom = zoom;
+                    }
+                }
                 // Level of detail uses the RAW (unclamped) screen zoom, exactly as
                 // paint() does — the clamped request zoom would misreport detail
                 // mode whenever the view is deeper than the archive's max.
@@ -894,6 +943,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         for (int ty = r[2]; ty <= r[3]; ty++) {
                             String key = tileKey(facing, zoom, tx, ty);
                             if (loadedTileKeys.contains(key) || emptyTileKeys.contains(key)) {
+                                continue;
+                            }
+                            if (refineOnly && !groundAlreadyDownloaded(facing, zoom, tx, ty)) {
+                                // Never downloaded here, so the user has not asked
+                                // for this ground; a zoom refresh must not quietly
+                                // widen coverage.
                                 continue;
                             }
                             // UNION over every current scope. Logged in that is the
@@ -1021,6 +1076,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         }
                     }
                     Logging.info("Maprizon " + BUILD_TAG + " download z" + reqZoom + " added: " + perFacing);
+                    // The view now holds data requested at this zoom, so the
+                    // zoom-refresh trigger stops firing until you go deeper still.
+                    if (reqZoom > refinedToZoom) {
+                        refinedToZoom = reqZoom;
+                    }
                     if (userInitiated) {
                         new Notification("<html><b>Maprizon download</b> (z" + reqZoom + ", " + BUILD_TAG + ")<br>"
                                 + perFacing + "</html>")
@@ -1266,6 +1326,31 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return kept;
     }
 
+    /**
+     * Was this ground already downloaded at a COARSER zoom? True when any ancestor
+     * of the tile is in the ledger with data.
+     *
+     * <p>This is what makes the zoom refresh safe to run unprompted: it re-fetches
+     * only where the user has already asked for coverage, so it can sharpen the
+     * screen but never expand it. Ground that was probed and found EMPTY does not
+     * count — there is nothing there to sharpen.
+     */
+    private boolean groundAlreadyDownloaded(String facing, int zoom, int tx, int ty) {
+        int z = zoom - 1;
+        int x = tx >> 1;
+        int y = ty >> 1;
+        int floor = Math.max(0, archiveMinZoom());
+        while (z >= floor) {
+            if (loadedTileKeys.contains(tileKey(facing, z, x, y))) {
+                return true;
+            }
+            z -= 1;
+            x >>= 1;
+            y >>= 1;
+        }
+        return false;
+    }
+
     /** Tiles in {@code r} already fetched once and found to contain nothing (the
      * negative cache). Used only to explain an empty download honestly — see
      * {@link #showNothingAdded}. */
@@ -1392,8 +1477,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * view change within the window resets it, so a continuous pan fires exactly one
      * load when it settles rather than a storm mid-drag. EDT. */
     private void scheduleAutoDownload(Bounds bbox, int widthPx) {
+        scheduleAutoDownload(bbox, widthPx, false);
+    }
+
+    private void scheduleAutoDownload(Bounds bbox, int widthPx, boolean refineOnly) {
         pendingAutoBounds = new Bounds(bbox);
         pendingAutoWidth = widthPx;
+        pendingRefineOnly = refineOnly;
         if (autoDebounceTimer == null) {
             autoDebounceTimer = new Timer(AUTO_DEBOUNCE_MS, e -> fireAutoDownload());
             autoDebounceTimer.setRepeats(false);
@@ -1403,7 +1493,16 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     private void fireAutoDownload() {
         Bounds b = pendingAutoBounds;
-        if (b == null || !autoRefresh || loading.get()) {
+        if (b == null || loading.get()) {
+            return;
+        }
+        if (pendingRefineOnly) {
+            // Zoom refresh: allowed at any zoom (it only sharpens ground already
+            // downloaded, so it cannot mass-load) and independent of live mode.
+            submitDownload(b, pendingAutoWidth, true, false, true);
+            return;
+        }
+        if (!autoRefresh) {
             return;
         }
         // Re-check the gate at fire time: if the pan ended zoomed out of detail
