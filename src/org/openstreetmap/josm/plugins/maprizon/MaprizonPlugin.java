@@ -10,9 +10,11 @@ import org.openstreetmap.josm.plugins.Plugin;
 import org.openstreetmap.josm.plugins.PluginInformation;
 import org.openstreetmap.josm.plugins.maprizon.actions.DownloadMaprizonCoverageAction;
 import org.openstreetmap.josm.plugins.maprizon.actions.ShowMaprizonDiagnosticsAction;
+import org.openstreetmap.josm.plugins.maprizon.actions.ShowMaprizonForSelectionAction;
 import org.openstreetmap.josm.plugins.maprizon.actions.ShowMaprizonHelpAction;
 import org.openstreetmap.josm.plugins.maprizon.actions.ToggleMaprizonLayerAction;
 import org.openstreetmap.josm.plugins.maprizon.gui.MaprizonImageDialog;
+import org.openstreetmap.josm.plugins.maprizon.io.PluginUpdateCheck;
 import org.openstreetmap.josm.tools.Logging;
 
 import javax.swing.Action;
@@ -34,6 +36,10 @@ public class MaprizonPlugin extends Plugin {
     public MaprizonPlugin(PluginInformation info) {
         super(info);
 
+        // FIRST, before anything reports a version: seed the single source of
+        // truth from the jar manifest JOSM just parsed.
+        MaprizonVersion.set(info == null ? null : info.version);
+
         // Build the Tools-menu items EXPLICITLY. Adding the JosmAction to the menu
         // (raw JMenu.add or MainMenu.add) rendered the item with its label +
         // accelerator but never delivered clicks to actionPerformed (verified via
@@ -49,14 +55,19 @@ public class MaprizonPlugin extends Plugin {
         JMenu maprizonMenu = new JMenu("Maprizon");
         maprizonMenu.add(buildMenuItem(new ToggleMaprizonLayerAction()));
         maprizonMenu.add(buildMenuItem(new DownloadMaprizonCoverageAction()));
+        maprizonMenu.add(buildMenuItem(new ShowMaprizonForSelectionAction()));
         maprizonMenu.addSeparator();
         maprizonMenu.add(buildMenuItem(new ShowMaprizonDiagnosticsAction()));
         maprizonMenu.add(buildMenuItem(new ShowMaprizonHelpAction()));
         menu.addMenu(maprizonMenu, "Maprizon", KeyEvent.VK_M, menu.getMenuCount(), null);
 
-        MaprizonLog.info("plugin loaded, version "
-                + (info == null || info.version == null ? "?" : info.version)
+        MaprizonLog.info("plugin loaded, version " + MaprizonVersion.current()
                 + " — log file: " + MaprizonLog.file());
+
+        // Is there a newer build? Advisory only, off the EDT, silent on failure.
+        // Needed because this plugin is not in JOSM's plugin directory yet, so
+        // JOSM's own update check has nothing to compare against.
+        PluginUpdateCheck.runInBackground();
     }
 
     /** A Tools-menu item wired directly to the action's actionPerformed, carrying

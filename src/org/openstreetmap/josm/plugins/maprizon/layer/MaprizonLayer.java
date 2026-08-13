@@ -13,6 +13,7 @@ import org.openstreetmap.josm.gui.dialogs.LayerListDialog;
 import org.openstreetmap.josm.gui.layer.Layer;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
 import org.openstreetmap.josm.plugins.maprizon.MaprizonLog;
+import org.openstreetmap.josm.plugins.maprizon.MaprizonVersion;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
 import org.openstreetmap.josm.plugins.maprizon.gui.MaprizonImageDialog;
 import org.openstreetmap.josm.plugins.maprizon.oauth.LoginFlow;
@@ -176,9 +177,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /**
      * Shown in the download notification + log so it is always self-evident WHICH
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
-     * stale jar silently runs old code otherwise). Bump on behavior changes.
+     * stale jar silently runs old code otherwise).
+     *
+     * <p>Read from the jar manifest via {@link MaprizonVersion} rather than
+     * hardcoded here. It was a hand-synced constant, which made the one number
+     * whose entire job is "prove which build is running" the number most likely
+     * to be wrong — it would cheerfully confirm the new version while the old jar
+     * ran.
      */
-    private static final String BUILD_TAG = "1.0.19";
+    private static String buildTag() {
+        return MaprizonVersion.current();
+    }
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -1135,7 +1144,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // paint() does — the clamped request zoom would misreport detail
                 // mode whenever the view is deeper than the archive's max.
                 boolean detailMode = rawScreenZoom(view, widthPx) >= USABLE_ZOOM;
-                diagReset("==== MAPRIZON DOWNLOAD " + BUILD_TAG + " ====");
+                diagReset("==== MAPRIZON DOWNLOAD " + buildTag() + " ====");
                 diag(String.format(Locale.ROOT,
                         "view lon[%.6f..%.6f] lat[%.6f..%.6f] widthPx=%d -> zoom=%d archiveZoom[%d..%d] enforceBudget=%b detail=%b loggedIn=%b orgOnToken=%b enabled=%s",
                         view.getMinLon(), view.getMaxLon(), view.getMinLat(), view.getMaxLat(),
@@ -1364,14 +1373,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
                             added += n;
                         }
                     }
-                    Logging.info("Maprizon " + BUILD_TAG + " download z" + reqZoom + " added: " + perFacing);
+                    Logging.info("Maprizon " + buildTag() + " download z" + reqZoom + " added: " + perFacing);
                     // The view now holds data requested at this zoom, so the
                     // zoom-refresh trigger stops firing until you go deeper still.
                     if (reqZoom > refinedToZoom) {
                         refinedToZoom = reqZoom;
                     }
                     if (userInitiated) {
-                        new Notification("<html><b>Maprizon download</b> (z" + reqZoom + ", " + BUILD_TAG + ")<br>"
+                        new Notification("<html><b>Maprizon download</b> (z" + reqZoom + ", " + buildTag() + ")<br>"
                                 + perFacing + "</html>")
                                 .setDuration(Notification.TIME_LONG).show();
                     }
@@ -2459,8 +2468,30 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * "still" is not an accepted value for that parameter, so it is omitted for
      * still features (the rest of the link is unaffected).
      */
+    /**
+     * A viewer link carrying ONLY a location — no sequence, no facing.
+     *
+     * <p>Used by the "imagery for the selected OSM object" action, where there is
+     * no Maprizon feature to point at, just a place. What the viewer then shows
+     * follows the user's own session (public logged out, plus their org's private
+     * imagery logged in), which is the same thing they would see by opening
+     * Maprizon by hand — so the link deliberately carries no scope of its own.
+     *
+     * <p>Shares the base URL and hash format with {@link #buildDeepLink} so the
+     * two cannot drift.
+     */
+    public static String locationDeepLink(double lat, double lon, int zoom) {
+        return VIEWER_BASE + "#mapHash=" + zoom + "/"
+                + String.format(Locale.ROOT, "%.6f", lat) + "/"
+                + String.format(Locale.ROOT, "%.6f", lon);
+    }
+
+    /** Base URL of the Maprizon web viewer — one definition for every link built
+     * here. */
+    private static final String VIEWER_BASE = "https://app.maprizon.com/";
+
     static String buildDeepLink(ImageryFeature feature, double lat, double lon) {
-        StringBuilder qs = new StringBuilder("https://app.maprizon.com/?");
+        StringBuilder qs = new StringBuilder(VIEWER_BASE + "?");
         boolean first = true;
         first = appendParam(qs, "sequence_id", feature.getSequenceId(), first);
         first = appendParam(qs, "sequence_index", feature.getSequenceIndex(), first);
