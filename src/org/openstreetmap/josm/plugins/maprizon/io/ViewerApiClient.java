@@ -577,28 +577,48 @@ public final class ViewerApiClient {
             return rawUrl;
         }
         String token = ViewerAuth.getInstance().getValidAccessToken();
-        if (token == null) {
-            return rawUrl; // anonymous: public bytes straight from the raw URL
-        }
+        // ANONYMOUS IMAGES MUST BE SIGNED TOO, via the JWT-exempt public route.
+        //
+        // This used to return the raw URL, on the premise that public imagery is
+        // public-read in Spaces and can simply be fetched. That stopped being
+        // true: the image bucket went private, exactly as the tile bucket did on
+        // 2026-07-22. Measured 2026-08-13, fetching a `img` URL straight out of
+        // the public bake with no auth:
+        //
+        //   GET https://kaart.sfo3.digitaloceanspaces.com/Images/…/…jpg
+        //   -> 403 <Error><Code>AccessDenied</Code><BucketName>kaart</…>
+        //
+        // The symptom is badly misleading: coverage geometry still draws (the
+        // TILE bucket is still public-read, so nothing looks broken) and every
+        // click then reports "Image unavailable — may be private", on imagery
+        // that is public and that the user can see in the web app. The plugin
+        // cannot tell 403-because-private from 403-because-the-bucket-changed.
+        //
+        // POST images/public/sign is the server's answer for exactly this, and
+        // needs no token — verified anonymously against production, returning a
+        // signed URL that serves the bytes.
+        String endpoint = token != null ? "images/sign" : "images/public/sign";
         try {
             byte[] payload = Json.createObjectBuilder()
                     .add("img_url", rawUrl)
                     .build()
                     .toString()
                     .getBytes(StandardCharsets.UTF_8);
-            HttpClient.Response res = HttpClient
-                    .create(new URL(API_BASE + "images/sign"), "POST")
-                    .setHeader("Authorization", "Bearer " + token)
+            HttpClient client = HttpClient
+                    .create(new URL(API_BASE + endpoint), "POST")
                     .setHeader("Content-Type", "application/json")
                     .setHeader("Accept", "application/json")
                     .setConnectTimeout(CONNECT_TIMEOUT_MS)
                     .setReadTimeout(READ_TIMEOUT_MS)
-                    .setRequestBody(payload)
-                    .connect();
+                    .setRequestBody(payload);
+            if (token != null) {
+                client.setHeader("Authorization", "Bearer " + token);
+            }
+            HttpClient.Response res = client.connect();
             if (res.getResponseCode() != 200) {
                 // 403 = withheld/not-servable; anything else = transient. Fall back
                 // to raw (which may itself 403 for private, surfaced to the user).
-                Logging.warn("Maprizon: images/sign returned HTTP " + res.getResponseCode());
+                Logging.warn("Maprizon: " + endpoint + " returned HTTP " + res.getResponseCode());
                 return rawUrl;
             }
             try (JsonReader reader = Json.createReader(
