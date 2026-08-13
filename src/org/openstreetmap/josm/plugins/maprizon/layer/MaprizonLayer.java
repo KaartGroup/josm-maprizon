@@ -178,7 +178,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * build JOSM actually loaded (JOSM only reads plugin jars at startup — a
      * stale jar silently runs old code otherwise). Bump on behavior changes.
      */
-    private static final String BUILD_TAG = "1.0.10";
+    private static final String BUILD_TAG = "1.0.19";
 
     /** Set true right after a download merges, so the NEXT paint logs a one-shot
      * snapshot of what is actually on screen (per facing: total + in-view). */
@@ -292,6 +292,108 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * the angle into a sprite); here it is drawn vectorially. Tunable. */
     private static final double CONE_FOV_DEG = 60.0;
     private static final int CONE_RADIUS_PX = 40;
+
+    // --- direction-of-travel arrows (pass 3) ---
+
+    /**
+     * Spacing (px) between direction chevrons along a sequence line, measured in
+     * SCREEN space so the density stays constant at every zoom — the app gets the
+     * same effect from Mapbox tessellating a `line-pattern` sprite.
+     */
+    private static final int ARROW_SPACING_PX = 95;
+
+    /**
+     * How much larger the WHOLE coverage stack is drawn once individual images are
+     * selectable (display zoom &gt;= {@link #DETAIL_MIN_ZOOM}).
+     *
+     * <p>The base sizes are tuned for reading coverage as a network from a
+     * distance — thin ribbons, small dots — and at that weight a direction arrow
+     * cannot win: the mark can only ever be as big as the 3px line it sits on, so
+     * every attempt to make it legible either overflowed the ribbon or stayed
+     * squint-small. Scaling the line is what buys the arrow room.
+     *
+     * <p>Applied to line width, casing, point radius, ribbon offset AND arrowhead
+     * together, deliberately as ONE number: the ribbon step is sized just over the
+     * casing width so the four coincident facings separate cleanly
+     * ({@link #RIBBON_STEP_PX}), and scaling the strokes without the step would
+     * close that gap and merge the facings back into the single opaque slab the
+     * ribbons exist to prevent.
+     *
+     * <p>Gated on the same zoom as the arrows, and for the same reason: at
+     * selectable zoom you are working a street rather than scanning a city, so the
+     * heavier weight costs nothing and the legibility is the point.
+     */
+    private static final float DETAIL_SCALE = 1.8f;
+
+    /** Arrowhead length (px), tip to base, along the direction of travel, before
+     * {@link #DETAIL_SCALE}. */
+    private static final float ARROW_LEN_PX = 6.5f;
+
+    /**
+     * Half-width (px) of the arrowhead's base, before {@link #DETAIL_SCALE}.
+     *
+     * <p>Held BELOW half the ribbon's cased width so the head sits inside the line
+     * rather than straddling its edges: the casing is {@code LINE_WIDTH + 2} wide,
+     * so its half-width is 2.5 at base weight, and 2.8 overflowed it visibly in
+     * JOSM. 2.2 clears it with a margin at every scale, since both sides scale
+     * together.
+     */
+    private static final float ARROW_HALF_WIDTH_PX = 2.2f;
+
+    /**
+     * Display zoom at/above which the layer switches to DETAIL rendering: heavier
+     * strokes ({@link #DETAIL_SCALE}) and direction arrows. The zoom at which
+     * individual images become selectable.
+     *
+     * <p><b>16 is not a taste setting, it is where the data changes.</b> Per-image
+     * POINT features — the ones carrying {@code img}, {@code heading} and
+     * {@code sequence_index}, i.e. the ones a click can actually open — exist ONLY
+     * in the z16 bake. z15 and coarser carry sequence LINES and nothing else
+     * (measured over the live archives: {@code testbed/ArrowDirectionProbe.java},
+     * z16 ≈ 180 points + 12 lines per tile, z15 and z14 exactly 0 points). So
+     * below z16 there is nothing to select, and an arrow inviting a mapper to pick
+     * a direction they cannot yet act on is just clutter — which is what the first
+     * cut at z14 looked like.
+     *
+     * <p>Coarse geometry argues the same way independently: an overzoomed ancestor
+     * is tippecanoe-simplified toward right angles, so a chevron on it points
+     * along the simplification rather than along the road.
+     *
+     * <p><b>This is a PAINT threshold and decides nothing about loading.</b> Every
+     * facing still loads and draws at every zoom — see {@link #USABLE_ZOOM} for why
+     * that rule exists and what breaking it cost.
+     */
+    private static final int DETAIL_MIN_ZOOM = 16;
+
+    /**
+     * Display zoom at/above which the per-image MARKERS are painted.
+     *
+     * <p>Deliberately deeper than {@link #DETAIL_MIN_ZOOM}, and the gap is
+     * measured rather than chosen. Consecutive images sit a median 7.2 m apart
+     * (4.5 m at the tight tenth) — sampled over 2849 consecutive pairs in the live
+     * public bake. Against a marker ~10px across at detail weight that gives:
+     *
+     * <pre>
+     *   z16   3.1 px apart -> merged into a solid tube
+     *   z17   6.1 px       -> touching
+     *   z18  12.3 px       -> mostly separated (tight runs still touch)
+     *   z19  24.6 px       -> clearly separated
+     * </pre>
+     *
+     * <p>So below z18 a "point" is not a point: the markers fuse into a fat
+     * caterpillar that hides the ribbon, its colour and its arrows, while claiming
+     * a precision the display cannot show. Worse, they were being painted at EVERY
+     * zoom — features downloaded at z16 stay in the layer, so zooming out to z12
+     * still drew every one of them — which is a lot of ovals to fill for a
+     * smear no one can click.
+     *
+     * <p>19 rather than 18: 18 is the first zoom where a marker reads as an
+     * individual image at all, but its tight runs still touch (7.6 px between
+     * centres against a 10 px marker). 19 is the first zoom where every run is
+     * clearly separated, and it is the zoom the markers were judged at in the
+     * editor.
+     */
+    private static final int POINT_MIN_ZOOM = 19;
 
     /** Login/logout changes the SET of tile scopes read (public alone vs the org's
      * private bake + public), and the tile ledger is not scope-keyed, so both the
@@ -420,6 +522,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
         // individual image points).
         int rawZoom = rawScreenZoom(bbox, mv.getWidth());
         boolean detailMode = rawZoom >= USABLE_ZOOM;
+        // One weight for the whole stack — see DETAIL_SCALE.
+        float scale = detailScale(rawZoom);
 
         // Live mode (opt-in): re-download when the view meaningfully moved/zoomed —
         // but ONLY in detail mode (so a zoomed-out pan never triggers a coarse
@@ -446,40 +550,111 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        // TWO passes so no facing's colour is buried under another facing's black
-        // casing where they overlap (facings share a vehicle's GPS trace and can
-        // be dense — e.g. right >> front here). Pass 1: all black casings/outlines.
-        // Pass 2: all coloured lines/points on top.
-        for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
-            if (!enabledFacings.contains(entry.getKey())) {
-                continue;
-            }
-            float offsetPx = facingOffsetPx(entry.getKey());
-            for (ImageryFeature feature : entry.getValue()) {
-                if (!lodVisible(feature)) {
-                    continue;
-                }
-                paintCasing(g, mv, feature, offsetPx);
-            }
-        }
+        // STRICT Z-ORDER, one pass per layer of the stack, over a projection made
+        // ONCE per feature.
+        //
+        // <p>Why passes rather than drawing each feature completely: two features
+        // that overlap must stack by WHAT they are, not by the order the map
+        // happens to iterate them. Casings were already split out for that reason
+        // (so no facing's colour is buried under another facing's black casing).
+        // The image POINTS had not been, and it showed: a point feature iterated
+        // before a line was painted over by that line, so the very markers a
+        // mapper clicks kept disappearing under a neighbouring drive's ribbon,
+        // seemingly at random. Points now go last, above the lines and above the
+        // arrows, because they are the selectable thing on the layer.
+        //
+        // <p>Projecting once also makes five passes cheaper than the old three:
+        // toScreen was previously re-run per pass, per feature.
+        List<Drawn> drawn = new ArrayList<>();
         for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
             if (!enabledFacings.contains(entry.getKey())) {
                 continue;
             }
             Color color = FacingStyle.colorFor(entry.getKey());
-            float offsetPx = facingOffsetPx(entry.getKey());
+            float offsetPx = facingOffsetPx(entry.getKey(), scale);
             for (ImageryFeature feature : entry.getValue()) {
                 if (!lodVisible(feature)) {
                     continue;
                 }
-                paintColor(g, mv, feature, color, offsetPx);
+                drawn.add(new Drawn(toScreen(mv, feature, offsetPx), color));
+            }
+        }
+
+        // 1. black line casings
+        g.setStroke(new BasicStroke((LINE_WIDTH + 2f) * scale, BasicStroke.CAP_ROUND,
+                BasicStroke.JOIN_ROUND));
+        g.setColor(Color.BLACK);
+        for (Drawn d : drawn) {
+            if (d.screen.length > 1) {
+                drawPolyline(g, d.screen);
+            }
+        }
+
+        // 2. facing-coloured lines
+        g.setStroke(new BasicStroke(LINE_WIDTH * scale, BasicStroke.CAP_ROUND,
+                BasicStroke.JOIN_ROUND));
+        for (Drawn d : drawn) {
+            if (d.screen.length > 1) {
+                g.setColor(d.color);
+                drawPolyline(g, d.screen);
+            }
+        }
+
+        // 3. direction-of-travel arrowheads on top of the coloured lines, so a
+        // mapper can tell which way a drive went WITHOUT selecting it — which is
+        // the whole point of them, and why per-image arrows on the selected
+        // sequence would not have answered it. Mirrors the app's third stacked
+        // layer (outline / colour / arrow) in sequenceLayerStyles.js.
+        if (rawZoom >= DETAIL_MIN_ZOOM) {
+            java.awt.Rectangle clip = g.getClipBounds();
+            for (Drawn d : drawn) {
+                if (d.screen.length < 2) {
+                    continue;
+                }
+                for (double[] a : arrowAnchors(d.screen)) {
+                    int ax = (int) Math.round(a[0]);
+                    int ay = (int) Math.round(a[1]);
+                    if (clip == null || clip.contains(ax, ay)) {
+                        drawArrowHead(g, ax, ay, a[2], a[3], scale);
+                    }
+                }
+            }
+        }
+
+        // 4. black point casings, then 5. facing-coloured points — last, so the
+        // markers a click resolves to are never hidden under another drive's line.
+        //
+        // <p>Every vertex is marked, exactly as before this pass order existed.
+        // Restricting markers to standalone image features was tried and reverted:
+        // it is a defensible claim about the data (a line's vertices are the
+        // decimated shape of the sequence path, and the images are the separate
+        // point features) but it is NOT a layering change, and in practice it
+        // deleted every marker that sits ON a line and left only the standalone
+        // points — which carry a horizontal ribbon offset (see toScreen) and so
+        // read as floating away from the geometry. The z-order was the bug; which
+        // vertices are marked is a separate question and not one to settle as a
+        // side effect of fixing it.
+        if (rawZoom >= POINT_MIN_ZOOM) {
+            int casingR = Math.round((POINT_RADIUS + 1) * scale);
+            int pointR = Math.round(POINT_RADIUS * scale);
+            g.setColor(Color.BLACK);
+            for (Drawn d : drawn) {
+                for (Point p : d.screen) {
+                    g.fillOval(p.x - casingR, p.y - casingR, 2 * casingR, 2 * casingR);
+                }
+            }
+            for (Drawn d : drawn) {
+                g.setColor(d.color);
+                for (Point p : d.screen) {
+                    g.fillOval(p.x - pointR, p.y - pointR, 2 * pointR, 2 * pointR);
+                }
             }
         }
 
         // Selected-feature highlight drawn last, on top of everything.
         if (lastNearestFeature != null && lastNearestPoint != null
                 && enabledFacings.contains(lastNearestFeature.getFacing())) {
-            paintHighlight(g, mv);
+            paintHighlight(g, mv, scale);
         }
 
         // Loading feedback: animated spinner + label while a download runs (explicit
@@ -526,14 +701,22 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * four coincident drive facings render as parallel ribbons instead of
      * stacking. Symmetric about the true trace; {@code still} (loose points)
      * stays centered. See {@link #RIBBON_STEP_PX}. */
-    private static float facingOffsetPx(String facing) {
+    private static float facingOffsetPx(String facing, float scale) {
+        float step = RIBBON_STEP_PX * scale;
         switch (facing) {
-            case FacingStyle.FRONT:      return -1.5f * RIBBON_STEP_PX;
-            case FacingStyle.LEFT:       return -0.5f * RIBBON_STEP_PX;
-            case FacingStyle.RIGHT:      return  0.5f * RIBBON_STEP_PX;
-            case FacingStyle.FACING_360: return  1.5f * RIBBON_STEP_PX;
+            case FacingStyle.FRONT:      return -1.5f * step;
+            case FacingStyle.LEFT:       return -0.5f * step;
+            case FacingStyle.RIGHT:      return  0.5f * step;
+            case FacingStyle.FACING_360: return  1.5f * step;
             default:                     return  0f; // still
         }
+    }
+
+    /** The weight multiplier for the current display zoom: heavier once individual
+     * images are selectable, base weight when scanning coverage from further out.
+     * See {@link #DETAIL_SCALE}. */
+    private static float detailScale(int rawZoom) {
+        return rawZoom >= DETAIL_MIN_ZOOM ? DETAIL_SCALE : 1f;
     }
 
     /**
@@ -587,32 +770,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return out;
     }
 
-    /** Pass 1: black casing under the line + black outline under each point, so
-     * light colours (esp. white front) stay visible — mirrors the viewer. */
-    private void paintCasing(Graphics2D g, MapView mv, ImageryFeature feature, float offsetPx) {
-        Point[] screen = toScreen(mv, feature, offsetPx);
-        g.setColor(Color.BLACK);
-        if (screen.length > 1) {
-            g.setStroke(new BasicStroke(LINE_WIDTH + 2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            drawPolyline(g, screen);
-        }
-        int r = POINT_RADIUS + 1;
-        for (Point p : screen) {
-            g.fillOval(p.x - r, p.y - r, 2 * r, 2 * r);
-        }
-    }
 
-    /** Pass 2: the facing-coloured line + point on top of the casing. */
-    private void paintColor(Graphics2D g, MapView mv, ImageryFeature feature, Color color, float offsetPx) {
-        Point[] screen = toScreen(mv, feature, offsetPx);
-        g.setColor(color);
-        if (screen.length > 1) {
-            g.setStroke(new BasicStroke(LINE_WIDTH, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-            drawPolyline(g, screen);
-        }
-        int r = POINT_RADIUS;
-        for (Point p : screen) {
-            g.fillOval(p.x - r, p.y - r, 2 * r, 2 * r);
+
+    /** One feature, already projected to screen, with the colour of its facing —
+     * so the z-ordered passes can draw it without re-projecting or re-looking-up. */
+    private static final class Drawn {
+        final Point[] screen;
+        final Color color;
+
+        Drawn(Point[] screen, Color color) {
+            this.screen = screen;
+            this.color = color;
         }
     }
 
@@ -620,6 +788,91 @@ public class MaprizonLayer extends Layer implements MouseListener {
         for (int i = 1; i < pts.length; i++) {
             g.drawLine(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y);
         }
+    }
+
+
+    /**
+     * Where the arrowheads go along a screen-space polyline, and which way each
+     * points: one {@code {x, y, ux, uy}} per arrow, {@code (ux,uy)} being the unit
+     * travel direction of the segment the arrow landed on.
+     *
+     * <p>Split out from the painting so it can be exercised against real tile
+     * geometry without a live {@link MapView} — see
+     * {@code testbed/ArrowRenderPreview.java}, which drives this and
+     * {@link #drawArrowHead} to render the actual output to a PNG.
+     *
+     * <p>Walks in screen space, so arrow density is constant at every zoom. The
+     * first arrow lands half a spacing in rather than a full one, so a short line
+     * still gets an arrow instead of none — which matters for a decimated coarse
+     * line only a little longer than the spacing.
+     */
+    static List<double[]> arrowAnchors(Point[] pts) {
+        List<double[]> out = new ArrayList<>();
+        if (pts.length < 2) {
+            return out;
+        }
+        double untilNext = ARROW_SPACING_PX / 2.0;
+        for (int i = 1; i < pts.length; i++) {
+            double dx = pts[i].x - pts[i - 1].x;
+            double dy = pts[i].y - pts[i - 1].y;
+            double segLen = Math.hypot(dx, dy);
+            if (segLen < 1e-6) {
+                continue;
+            }
+            double ux = dx / segLen;
+            double uy = dy / segLen;
+            double along = untilNext;
+            while (along <= segLen) {
+                out.add(new double[]{
+                        pts[i - 1].x + ux * along,
+                        pts[i - 1].y + uy * along,
+                        ux, uy});
+                along += ARROW_SPACING_PX;
+            }
+            untilNext = along - segLen;
+        }
+        return out;
+    }
+
+    /**
+     * One solid black arrowhead with its TIP at {@code (x,y)}, pointing along the
+     * travel direction {@code (ux,uy)} (a unit vector).
+     *
+     * <p><b>A filled triangle, after two open-stroke attempts failed in opposite
+     * directions.</b> Rendered side by side on the same road at true z16 scale
+     * ({@code testbed/ArrowVariantPreview.java}) the trade is plain: a large
+     * cased-white chevron reads clearly but is clunky and out-shouts the facing
+     * colours that carry the actual information, while shrinking it to sit inside
+     * the ribbon makes an open V nearly invisible — two hairlines a couple of
+     * pixels long, against a line that is itself only 3px wide and already
+     * crossed by four facings' worth of geometry. Sharpening the V (a 20°
+     * half-angle) only turns it into a tick mark. A filled head solves both at
+     * once: it puts down actual ink at a small size, so it stays legible without
+     * being large, and its silhouette is unambiguously directional in a way two
+     * thin strokes are not.
+     *
+     * <p>Black, and deliberately NOT tinted per facing — the repo rule that an
+     * outline encodes shape and never category applies here too.
+     *
+     * <p>Package-private rather than private so the render preview probes draw the
+     * real mark instead of a lookalike.
+     */
+    static void drawArrowHead(Graphics2D g, int x, int y, double ux, double uy, float scale) {
+        double len = ARROW_LEN_PX * scale;
+        double halfW = ARROW_HALF_WIDTH_PX * scale;
+        // Base sits one arrow-length back along travel; its corners are offset
+        // perpendicular (the left/right normals of the travel direction).
+        double baseX = x - ux * len;
+        double baseY = y - uy * len;
+        double nx = -uy;
+        double ny = ux;
+        Path2D.Double head = new Path2D.Double();
+        head.moveTo(x, y);
+        head.lineTo(baseX + nx * halfW, baseY + ny * halfW);
+        head.lineTo(baseX - nx * halfW, baseY - ny * halfW);
+        head.closePath();
+        g.setColor(Color.BLACK);
+        g.fill(head);
     }
 
     /**
@@ -651,17 +904,53 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Draw a prominent ring + facing-coloured dot at the currently selected
      * feature's clicked point, so a click gives visible confirmation of what is
      * selected (and thus what "View in Maprizon" will open). */
-    private void paintHighlight(Graphics2D g, MapView mv) {
-        Point p = mv.getPoint(new LatLon(lastNearestPoint[1], lastNearestPoint[0]));
+    private void paintHighlight(Graphics2D g, MapView mv, float scale) {
+        Point p = highlightScreenPoint(mv, scale);
         // View cone first, so the selection ring/dot stay on top of it.
         paintViewCone(g, p);
-        int r = SELECTED_RADIUS;
+        int r = Math.round(SELECTED_RADIUS * scale);
+        int dot = Math.round(POINT_RADIUS * scale);
         g.setStroke(new BasicStroke(2.5f));
         g.setColor(Color.WHITE);
         g.drawOval(p.x - r - 1, p.y - r - 1, 2 * (r + 1), 2 * (r + 1));
         g.setColor(FacingStyle.colorFor(lastNearestFeature.getFacing()));
         g.drawOval(p.x - r, p.y - r, 2 * r, 2 * r);
-        g.fillOval(p.x - POINT_RADIUS, p.y - POINT_RADIUS, 2 * POINT_RADIUS, 2 * POINT_RADIUS);
+        g.fillOval(p.x - dot, p.y - dot, 2 * dot, 2 * dot);
+    }
+
+    /**
+     * Where the selection ring and the view cone go: the SAME screen pixel the
+     * selected point was drawn at.
+     *
+     * <p>This used to re-project the raw lon/lat with {@code mv.getPoint}, which
+     * quietly disagreed with every marker on the layer. Coverage is drawn through
+     * {@link #toScreen}, which shifts each facing sideways so the four coincident
+     * drive facings separate into ribbons — up to 1.5 ribbon steps, i.e. ~12 px at
+     * detail weight. The highlight skipped that shift, so the cone and ring
+     * floated off the marker they belong to, by more at higher detail scale. Two
+     * ways of computing one position will always drift; there is now one way.
+     *
+     * <p>{@code lastNearestPoint} is always an element of the selected feature's
+     * own point list (both assignment sites take it from {@code getPoints()}), so
+     * the drawn vertex is found by identity, with a coordinate match as a fallback
+     * for any future caller that passes a copy.
+     */
+    private Point highlightScreenPoint(MapView mv, float scale) {
+        List<double[]> pts = lastNearestFeature.getPoints();
+        Point[] screen = toScreen(mv, lastNearestFeature,
+                facingOffsetPx(lastNearestFeature.getFacing(), scale));
+        for (int i = 0; i < pts.size() && i < screen.length; i++) {
+            if (pts.get(i) == lastNearestPoint) {
+                return screen[i];
+            }
+        }
+        for (int i = 0; i < pts.size() && i < screen.length; i++) {
+            double[] q = pts.get(i);
+            if (q[0] == lastNearestPoint[0] && q[1] == lastNearestPoint[1]) {
+                return screen[i];
+            }
+        }
+        return mv.getPoint(new LatLon(lastNearestPoint[1], lastNearestPoint[0]));
     }
 
     /**
@@ -1850,15 +2139,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
             return;
         }
         lastClickLatLon = map.mapView.getLatLon(e.getX(), e.getY());
-        NearestResult nearest = findNearest(lastClickLatLon);
-        // Reject if the nearest feature is too far from the click in SCREEN space
-        // (zoom-independent), so clicking empty map selects nothing.
-        if (nearest != null) {
-            Point fp = map.mapView.getPoint(new LatLon(nearest.point[1], nearest.point[0]));
-            if (Math.hypot(fp.x - e.getX(), fp.y - e.getY()) > SELECT_PIXEL_THRESHOLD) {
-                nearest = null;
-            }
-        }
+        // Hit-test against WHERE THE RIBBONS ARE DRAWN, at the weight they are
+        // drawn at — not against the raw trace. See findNearest.
+        int rawZoom = rawScreenZoom(map.mapView.getRealBounds(), map.mapView.getWidth());
+        NearestResult nearest = findNearest(new Point(e.getX(), e.getY()), map.mapView,
+                detailScale(rawZoom));
         if (nearest == null) {
             return;
         }
@@ -1908,25 +2193,61 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
     }
 
-    private NearestResult findNearest(LatLon from) {
+    /**
+     * The drawn point nearest a click, or null if nothing is within
+     * {@link #SELECT_PIXEL_THRESHOLD} pixels of it.
+     *
+     * <p><b>Measured in SCREEN space against the ribbon offsets, because that is
+     * where the user is aiming.</b> This used to compare raw lon/lat: it ignored
+     * the sideways shift that separates the facings, so the thing it matched was
+     * the underlying GPS trace rather than any line on screen. The four drive
+     * facings share ONE trace, so their unoffset points are near-identical and
+     * "nearest" among them was effectively arbitrary — clicking a specific
+     * coloured ribbon could select a different facing entirely. That is precisely
+     * the choice the direction arrows exist to let a mapper make, so being able to
+     * see which ribbon you want and not being able to click it is half a feature.
+     *
+     * <p>Also skips facings the user has hidden and features the level-of-detail
+     * filter is not drawing: an invisible feature cannot have been aimed at, and
+     * selecting one looks like a bug from the outside.
+     *
+     * <p>Degrees-squared also was not a distance — a degree of longitude is
+     * shorter than a degree of latitude everywhere off the equator, so the old
+     * comparison was subtly biased. Pixels are isotropic and are the units the
+     * threshold is expressed in.
+     */
+    private NearestResult findNearest(Point clickPx, MapView mv, float scale) {
         ImageryFeature bestFeature = null;
         double[] bestPoint = null;
         double bestDistSq = Double.MAX_VALUE;
-        for (List<ImageryFeature> features : featuresByFacing.values()) {
-            for (ImageryFeature f : features) {
-                for (double[] p : f.getPoints()) {
-                    double dLon = p[0] - from.lon();
-                    double dLat = p[1] - from.lat();
-                    double distSq = dLon * dLon + dLat * dLat;
+        double limitSq = SELECT_PIXEL_THRESHOLD * SELECT_PIXEL_THRESHOLD;
+        for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
+            if (!enabledFacings.contains(entry.getKey())) {
+                continue;
+            }
+            float offsetPx = facingOffsetPx(entry.getKey(), scale);
+            for (ImageryFeature f : entry.getValue()) {
+                if (!lodVisible(f)) {
+                    continue;
+                }
+                Point[] screen = toScreen(mv, f, offsetPx);
+                List<double[]> pts = f.getPoints();
+                for (int i = 0; i < screen.length && i < pts.size(); i++) {
+                    double dx = screen[i].x - clickPx.x;
+                    double dy = screen[i].y - clickPx.y;
+                    double distSq = dx * dx + dy * dy;
                     if (distSq < bestDistSq) {
                         bestDistSq = distSq;
                         bestFeature = f;
-                        bestPoint = p;
+                        bestPoint = pts.get(i);
                     }
                 }
             }
         }
-        return bestFeature == null ? null : new NearestResult(bestFeature, bestPoint);
+        if (bestFeature == null || bestDistSq > limitSq) {
+            return null;
+        }
+        return new NearestResult(bestFeature, bestPoint);
     }
 
     // -------------------------------------------------------- Layer plumbing
@@ -1953,6 +2274,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     .append(enabledFacings.contains(facing) ? "" : " (hidden)").append("<br>");
         }
         sb.append(autoRefresh ? "auto-refresh: on" : "auto-refresh: off").append("<br>");
+        sb.append("<br>zoom thresholds: heavier lines + direction arrows from z")
+          .append(DETAIL_MIN_ZOOM).append(", image markers from z").append(POINT_MIN_ZOOM)
+          .append("<br>(JOSM shows the current zoom in its status bar)<br>");
         sb.append("</html>");
         JPanel panel = new JPanel(new BorderLayout());
         panel.add(new JLabel(sb.toString()), BorderLayout.CENTER);
