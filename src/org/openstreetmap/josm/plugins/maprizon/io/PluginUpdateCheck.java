@@ -53,13 +53,20 @@ import java.nio.charset.StandardCharsets;
  *   POST /backend/api/upload/check_uploader_version      (no auth header)
  *   {"version": "1.0.20", "product": "josm-maprizon", "platform": "mac"}
  *
- *   200 {"product":        "josm-maprizon",             // REQUIRED, see below
- *        "latest_version": "1.1.0",                      // required to say anything
- *        "download_url":   "https://…/Maprizon.jar",     // optional
- *        "message":        "…"}                          // optional
- *   426 {"product": "josm-maprizon",
- *        "required_version": "1.1.0", "message": "…"}    // treated as advisory here
+ *   200 {"product": "josm-maprizon", "status": "ok", …}  // nothing to say
+ *   426 {"product":         "josm-maprizon",            // REQUIRED, see below
+ *        "current_version": "1.1.0",                    // or latest_version /
+ *                                                       //    required_version
+ *        "download_url":    "https://…/Maprizon.jar",   // optional
+ *        "message":         "…"}                        // optional
  * </pre>
+ *
+ * <p>The existing gate compares versions for EXACT equality and 426s on any
+ * difference, so a client NEWER than the configured version is also told it is
+ * "out of date". That is right for the uploader, which must pin a build. Here it
+ * is handled by only ever speaking when the server's version is numerically
+ * newer than the running one — a plugin ahead of the env var stays silent rather
+ * than inviting a downgrade.</p>
  *
  * <p>The response MUST echo {@code "product": "josm-maprizon"}. Anything that does
  * not is ignored — including a 426 — because the endpoint is shared with the
@@ -160,9 +167,17 @@ public final class PluginUpdateCheck {
                         new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)))) {
                     JsonObject o = r.readObject();
                     product = string(o, "product");
+                    // Three spellings accepted, so the server side needs no new
+                    // vocabulary: `current_version` is what the existing gate
+                    // already returns with its 426 (flaskr/views/Upload.py), and
+                    // the other two are the names a purpose-built response would
+                    // more naturally use.
                     latest = string(o, "latest_version");
                     if (latest == null) {
                         latest = string(o, "required_version");
+                    }
+                    if (latest == null) {
+                        latest = string(o, "current_version");
                     }
                     downloadUrl = string(o, "download_url");
                     message = string(o, "message");
