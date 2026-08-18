@@ -27,8 +27,12 @@ protobuf, slf4j, pmtiles-reader. Adding a runtime dependency means dropping the
 jar in `lib/`; nothing else.
 
 JOSM only reads plugin jars at startup, so **restart JOSM after every
-`ant install`** — otherwise you are testing the previous build. `MaprizonLayer.BUILD_TAG`
-is printed in the download notification and the log precisely so you can tell.
+`ant install`** — otherwise you are testing the previous build. `MaprizonVersion`
+reads the running version from the **jar manifest** (which `build.xml` stamps) and
+prints it in the download notification and the log precisely so you can tell. It is
+read, never hardcoded: the string whose whole job is detecting a stale jar must not
+be a hand-synced constant that can itself go stale and confirm a version that is not
+running. (This replaced `MaprizonLayer.BUILD_TAG`, which had exactly that failure.)
 
 There is no unit-test framework and no CI. Verification is done with **throwaway
 probes in `testbed/`** (gitignored) that run against the live archives:
@@ -53,11 +57,12 @@ and tokens must never appear.
 
 ### Releasing
 
-Version lives in three hand-synced places — bump all of them:
-`build.xml` (`plugin.version`, the copy that actually drives the manifest),
-`plugin.properties` (documentation only, not read at build time), and
-`MaprizonLayer.BUILD_TAG`. `PluginsSource-edited.txt` is the JOSM wiki plugin
-list this jar's download URL is registered in.
+Version lives in two hand-synced places — bump both:
+`build.xml` (`plugin.version`, the copy that actually drives the manifest) and
+`plugin.properties` (documentation only, not read at build time). Everything the
+running plugin reports comes from the manifest via `MaprizonVersion`, so there is no
+third copy to forget. `PluginsSource-edited.txt` is the JOSM wiki plugin list this
+jar's download URL is registered in.
 
 ## Work intake (Trello)
 
@@ -80,10 +85,11 @@ things a standard read of it would get wrong:
 - Intake is **Feature Requests** and **Fixups** — there is no Other Changes / UI
   Changes / Bug Reports split, and **no guideline cards to skip**.
 - There is **no Blocked list**. A blocked card stays where it is with `BLOCKED:`
-  starting its name and the `NEED CLARIFYING` label (e.g. the Auth0 dashboard
-  prerequisite, parked in In Progress).
+  starting its name and the `NEED CLARIFYING` label. Strip the prefix when the card
+  moves — the Auth0 dashboard prerequisite carried it into Complete and read as
+  blocked work for a week.
 - There is **no Ready to Deploy**, because shipping here is a release, not a
-  deploy: bump the three hand-synced versions, build, and hand-install — the JOSM
+  deploy: bump the two hand-synced versions, build, and hand-install — the JOSM
   plugin-directory listing is still an open card.
 
 Never auto-post to a card. Draft questions and summaries in chat first; post only
