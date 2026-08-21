@@ -1,0 +1,265 @@
+= Plugins hosted external =
+[[PageOutline(2-9,Table of Contents)]]
+This contains the list of external plugin hyperlinks.
+
+It is parsed at 10-minute intervals and is used to update the [[wiki:Plugins|plugin list]].
+
+NOTE: Only HTTP and HTTPS protocols are supported. The last element of the link must be the name of the JAR file without any extensions. Additional text after the link in the same line is not allowed.
+
+Adding some hint to reach the maintainer for a link is helpful in case of trouble, otherwise links can be disabled without notice in case of problems with the plugin!
+
+== Valid Plugins ==
+
+* https://github.com/fieldpapers/josm-fieldpapers/releases/download/v0.6.0/fieldpapers.jar
+* https://github.com/iandees/josm-mbtiles/releases/download/v2.8.1/mbtiles.jar
+* https://github.com/matsim-org/josm-matsim-plugin/releases/latest/download/matsim.jar
+* https://github.com/tsmock/CADTools/releases/latest/download/CADTools.jar
+ * https://github.com/ROTARIUANAMARIA/CADTools/raw/master/CADTools.jar
+* https://github.com/maripo/JOSM_movementalert/releases/download/v1.3/MovementAlert.jar
+* https://github.com/maripo/JOSM_easypresets/releases/download/v2.5.1/easypresets.jar
+* https://github.com/maripo/JOSM_quicklabel/releases/download/24/QuickLabel.jar
+* https://github.com/bdxd111/JOSM-Polygon-Cut-Out/releases/download/v0.7.3/PolygonCutOut.jar
+* https://gitlab.com/vucod/microdata-scraping-jar-file/-/raw/master/microdata_scraping.jar
+* https://github.com/jkennedyie/relationdissolve/releases/download/v0.2.0/RelationDissolve.jar
+* https://github.com/DavidKarlas/JosmReviewPlugin/releases/latest/download/Review.Changes.jar
+* https://github.com/DavidKarlas/JosmRelationValidation/releases/latest/download/Relation.Validation.Plugin.jar
+* https://github.com/indoorequal/indoorequal-josm-plugin/releases/latest/download/indoorequal.jar
+* https://github.com/hhtznr/JOSM-Elevation-Plugin/releases/latest/download/Elevation.jar
+* https://github.com/hhtznr/JOSM-Tracks2Map-Plugin/releases/latest/download/Tracks2Map.jar
+* https://github.com/rikit639-dotcom/laplacian-smooth/releases/download/latest/laplacian-smooth.jar
+* https://github.com/PythonshellDebugwindow/PerpendicularWayFromNode/releases/latest/download/PerpendicularWayFromNode.jar
+* https://github.com/nj-yzf/josm-BetterIME/releases/latest/download/BetterIME.jar
+* https://gitlab.com/darkonus/josm-fillet-tools/-/releases/permalink/latest/downloads/FilletTools.jar
+* https://gitlab.com/darkonus/josm-trackpad-gestures/-/releases/permalink/latest/downloads/TrackpadGestures.jar
+* https://github.com/daishu0000/josm-geotiff/releases/latest/download/josmtiff.jar
+
+== in JOSM-GitHUB ==
+* https://github.com/JOSM/areaselector/releases/latest/download/areaselector.jar
+* https://github.com/JOSM/austriaaddresshelper/releases/latest/download/austriaaddresshelper.jar
+* https://github.com/JOSM/auto-tools/releases/latest/download/auto_tools.jar
+* https://github.com/JOSM/Building-Generalization/releases/latest/download/BuildingGeneralization.jar
+* https://github.com/JOSM/changeset-viewer/releases/latest/download/changeset-viewer.jar
+* https://github.com/JOSM/Color/releases/latest/download/ColorPlugin.jar
+* https://github.com/JOSM/configuration/releases/latest/download/config.jar
+* https://github.com/JOSM/conflation/releases/latest/download/conflation.jar
+* https://github.com/JOSM/continuos-download/releases/latest/download/continuosDownload.jar
+* https://github.com/JOSM/Dxf-Import/releases/latest/download/DxfImport.jar
+* https://github.com/JOSM/gridify/releases/latest/download/gridify.jar
+* https://github.com/JOSM/improve-way/releases/latest/download/ImproveWay.jar
+* https://github.com/JOSM/indoorhelper/releases/latest/download/indoorhelper.jar
+* https://github.com/JOSM/kartverketimport/releases/latest/download/kartverketimport.jar
+* https://github.com/JOSM/Mapillary/releases/latest/download/Mapillary.jar
+* https://github.com/JOSM/MapRoulette/releases/latest/download/MapRoulette.jar
+* https://github.com/JOSM/markseen/releases/latest/download/markseen.jar
+* https://github.com/JOSM/osm-obj-info/releases/latest/download/osm-obj-info.jar
+* https://github.com/JOSM/PicLayer/releases/latest/download/PicLayer.jar
+* https://github.com/JOSM/pt_assistant/releases/latest/download/pt_assistant.jar
+* https://github.com/JOSM/rex/releases/latest/download/rex.jar
+* https://github.com/JOSM/ShapeTools/releases/latest/download/ShapeTools.jar
+* https://github.com/JOSM/todo/releases/latest/download/todo.jar
+ * turnlanes-tagging is in SVN
+ * validations_testing not included
+* https://github.com/JOSM/wikipedia/releases/latest/download/wikipedia.jar
+
+=== by kendzi ===
+For issues with the following plugins, please contact osm user kendzi
+* https://github.com/kendzi/josm-jogl/releases/download/josm-jogl-1.2.3/jogl.jar
+ * (Old version of jogl: /kendzi/Kendzi3d/snapshot-jogl/current/kendzi3d-jogl.jar)
+* https://github.com/kendzi/TombPlugin/releases/download/58/TombPlugin.jar
+
+=== by Taylor Smock ===
+For issues with the following plugins, please contact Taylor Smock (~~vorpalblade-kaart~~/vorpalblade on OSM).
+* https://github.com/JOSM/highwayNameModification/releases/latest/download/highwaynamemodification.jar
+* https://github.com/JOSM/panoramax/releases/latest/download/panoramax.jar
+* https://github.com/JOSM/MapWithAI/releases/latest/download/mapwithai.jar
+* https://github.com/JOSM/routing2/releases/latest/download/routing2.jar
+* https://github.com/tsmock/sidewalks/releases/latest/download/sidewalks.jar
+* https://gokaart.gitlab.io/josm_wikidata/dist/latest/osmwiki-dataitem.jar
+* https://github.com/JOSM/OpenQA/releases/latest/download/openqa.jar
+ * https://smocktaylor.gitlab.io/josm_datepicker/dist/latest/datepicker.jar
+The following plugin is a temporary plugin for kendzi3d. It will, eventually, disappear. See https://github.com/kendzi/kendzi3d/pull/103 for more information.
+* https://github.com/tsmock/kendzi3d/releases/download/tsmock-jogl-to-lwjgl-v1.0.2/kendzi3d-dev.jar
+
+=== by Grab ===
+The sources for the plugins by Grab are located at https://github.com/kartaview/josm-plugin respectively
+* https://github.com/kartaview/josm-plugin/releases/latest/download/KartaView.jar
+* https://github.com/ImproveOSM/geohash-plugin/releases/latest/download/geohash.jar
+
+=== by Gubaer ===
+* https://github.com/Gubaer/josm-contourmerge-plugin/releases/latest/download/contourmerge.jar
+* https://github.com/Gubaer/josm-scripting-plugin/releases/latest/download/scripting.jar
+
+=== by qeef ===
+* https://mapathoner.mapathon.cz/mapathoner.jar
+* https://damn-plugin.damn-project.org/damn.jar
+
+=== by [osmwww:/user/hvzsr hvzsr] ===
+* https://raw.githubusercontent.com/osmai/jars/master/osmai.jar
+
+=== by Jamalek ===
+* https://jamalek.gitlab.io/josm-batch-downloader/josm-batch-downloader.jar
+
+=== by [osmwww:user/Ubipo Ubipo] ===
+* https://github.com/ubipo/shrinkwrap/releases/latest/download/shrinkwrap.jar
+* https://github.com/ubipo/center-node/releases/latest/download/centernode.jar
+
+=== by [osmwww:user/kmpoppe kmpoppe] ===
+For contacts, use the OSM messaging function :)
+* https://github.com/kmpoppe/noteSolver/releases/latest/download/notesolver.jar
+* https://github.com/kmpoppe/fhrsPlugin/releases/latest/download/fhrsPlugin.jar
+
+=== by [osmwww:user/Marián%20Kyral Marián Kyral]  ===
+Repository: https://github.com/mkyral/josm-tracer
+* https://www.openstreetmap.cz/static/osm-tracer/Tracer-testing.jar
+
+=== by JJWW ===
+* https://github.com/JJWW-osm/josm-makeparallel/releases/download/v1.1.0/MakeParallel.jar
+
+=== by Amᵃᵖanda ===
+
+* https://github.com/amandasaurus/josm-pTerry/releases/download/v0.2.1/pTerry.jar
+
+=== by micronull ===
+Repository: https://github.com/micronull/JOSM-Russia-address-helper-plugin
+* https://github.com/micronull/JOSM-Russia-address-helper-plugin/releases/latest/download/russia-address-helper.jar
+
+=== by Strubbl ===
+
+* https://github.com/Strubbl/changessum/releases/download/v0.1.1/changessum.jar
+
+=== by [osmwww:user/GhostFoxSledgehammer Kishan Tripathi] ===
+* https://github.com/GhostFoxSledgehammer/panoviewer-josm/releases/latest/download/panoviewer.jar
+
+=== by [osmwww:user/NieWnen NieWnen] ===
+
+* https://github.com/praszuk/josm-busstoptool-plugin/releases/download/v1.1.0/busstoptool.jar
+* https://github.com/praszuk/josm-fastdriveway-plugin/releases/download/v1.0.1/fastdriveway.jar
+* https://github.com/praszuk/josm-movemembership-plugin/releases/download/v1.3.0/movemembership.jar
+* https://github.com/praszuk/josm-plbuildings-plugin/releases/download/v2.2.3/plbuildings.jar
+* https://github.com/praszuk/josm-plmergeaddresses-plugin/releases/download/v1.0.0/plmergeaddresses.jar
+
+=== by [osmwww:user/Moldovan_Merkator] ===
+
+* https://github.com/Oni-DOS/josm-mdbuildings-plugin/releases/latest/download/mdbuildings-v2.jar
+
+=== by ramSeraph ===
+
+* https://github.com/ramSeraph/josm-gcs-imagery-enabler/releases/download/v0.0.1/gcsenabler-v0.0.1.jar
+
+=== by Masaya Aso, Atsunori Saito ===
+
+* https://github.com/LexxPluss/JOSMPlugin/releases/latest/download/lexxpluss.jar
+* https://github.com/LexxPluss/JOSMPlugin/releases/latest/download/lexxpluss_importer.jar
+* https://github.com/LexxPluss/JOSMPlugin/releases/latest/download/lexxpluss_tools.jar
+
+=== by [osmwww:user/yunica Junior Flores] ===
+
+* https://github.com/developmentseed/JosmMagicWand/releases/latest/download/josm_magic_wand.jar
+
+=== by gaben ===
+
+* https://github.com/gabortim/josm-phonenumber/releases/latest/download/phonenumber.jar
+* https://github.com/gabortim/josm-libphonenumber/releases/latest/download/libphonenumber.jar
+
+=== by [osmwww:user/Derick%20Rethans Derick Rethans] ===
+
+* https://github.com/derickr/josm-plugin-uberterrace/releases/download/0.38.0/uberterracer.jar
+
+=== by [osmwww:user/yanox1234 Andrew Brazhnikov] ===
+
+* https://github.com/CZBackendUser1234/exportPatch/releases/download/Release-2/patchExport-1.2.0.jar
+
+=== by [osmwww:user/Russ Russ] ===
+Report problems in the GitHub issues.
+
+* https://github.com/openinframap/josm-power-network-tools/releases/latest/download/PowerNetworkTools.jar
+
+=== by [osmwww:user/tvbrene tvbrene] ===
+For issues with the following plugins, please contact osm user tvbrene or report it in GitHub
+
+* https://github.com/ds10git/josm-extendedclipboard-plugin/releases/latest/download/ExtendedClipboard.jar
+* https://github.com/ds10git/josm-footandcycleways-plugin/releases/latest/download/FootAndCycleways.jar
+* https://github.com/ds10git/josm-kindahackedinutils-plugin/releases/latest/download/KindaHackedInUtils.jar
+* https://github.com/ds10git/josm-multilinetoolbar-plugin/releases/latest/download/MultiLineToolbar.jar
+* https://github.com/ds10git/josm-moveablesidebuttons-plugin/releases/latest/download/MoveableSideButtons.jar
+* https://github.com/ds10git/josm-toolbarcategories-plugin/releases/latest/download/ToolbarCategories.jar
+
+=== by [osmwww:user/Zkir Zkir] ===
+For issues with the following plugin, please contact osm user Zkir or open a ticket in GitHub.
+
+* https://github.com/Zkir/UrbanEye3D/releases/latest/download/urbaneye3d.jar
+
+=== by [osmwww:user/laznik laznik] ===
+For issues with the following plugin, please contact osm user laznik
+
+* https://rovas.app/sites/default/files/josm_rovas_connector_releases/RovasConnector.jar
+
+=== by [osmwww:user/UrSuS UrSuS] ===
+For issues with the following plugin, please contact osm user UrSuS
+
+* https://github.com/ypcyc/JOSM-Missing-Tools/releases/download/v1.0.0/JOSM.Missing.Tools.jar
+
+=== by comet ===
+* https://github.com/comet-builds/RiverTracer/releases/latest/download/RiverTracer.jar
+
+=== by [osmwww:user/jeffmeyer jeffmeyer] ===
+* https://github.com/OpenHistoricalMap/ohm-josm-chronology-tools/releases/latest/download/OHM_Chronology_Inspector.jar
+* https://github.com/OpenHistoricalMap/ohm-josm-imagery-helper/releases/latest/download/OHM_Imagery_Helper.jar
+* https://github.com/OpenHistoricalMap/ohm-josm-tag-validator/releases/latest/download/OHM_Tag_Validator.jar
+* https://github.com/OpenHistoricalMap/ohm-josm-time-filter-v2/releases/latest/download/OHM_Time_Filter.jar
+* https://github.com/OpenHistoricalMap/JOSM-zoomlevel-plugin/releases/latest/download/zoomlevel.jar
+
+=== by [osmwww:user/NM$L Nandaiji Yakxin] ===
+* https://github.com/Daredemodaisuki/Columbina/releases/latest/download/Columbina.jar
+
+=== by [osmwww:user/123_JK 123JK] ===
+* https://github.com/123-jk/RoadRailAlignment/releases/latest/download/RoadRailAlignment.jar
+
+=== by watmildon ===
+* https://github.com/watmildon/TIGER-ROAR/releases/latest/download/TIGER-ROAR.jar
+* https://github.com/watmildon/multipoly-gone/releases/latest/download/multipoly-gone.jar
+
+=== by Kaart ===
+For issues with the following plugin, please contact Chris Gousset or Devin Markley at dev@kaart.com.
+* https://github.com/KaartGroup/josm-maprizon/releases/latest/download/Maprizon.jar
+
+== Disabled Plugins ==
+
+{{{
+#!comment
+
+Note: The dead stuff below has an additional space at the beginning of the line. Don't remove that!
+
+}}}
+
+=== Invalid plugins ===
+ * https://github.com/BjornRasmussen/Lanes/releases/download/v2.3/Lanes.jar
+  * https://github.com/BjornRasmussen/Lanes/issues/6
+
+=== Unmaintained ===
+ * https://gokaart.gitlab.io/JOSM_lane-connectivity/dist/latest/intersection.jar
+  * https://github.com/kaart-labs/lane-connectivity_plugin/issues/6#issuecomment-833794884
+  * https://github.com/kaart-labs/lane-connectivity_plugin/issues/8
+ * https://github.com/kendzi/kendzi3d/releases/download/kendzi3d-parent-1.0.205/kendzi3d.jar
+  * https://josm.openstreetmap.de/ticket/21348
+ * https://github.com/kendzi/kendzi3d-resources/releases/download/kendzi3d-resources-0.0.2/kendzi3d-resources.jar
+ * https://github.com/kendzi/ContourOverlappingMerge/releases/download/fix4/ContourOverlappingMerge.jar
+ * Old version location: https://github.com/bularcasergiu/ContourOverlappingMerge/releases/download/alfa/ContourOverlappingMerge.jar
+  * https://github.com/kendzi/ContourOverlappingMerge/issues/2
+  * https://github.com/bularcasergiu/ContourOverlappingMerge/pull/2
+ * http://josm-plugins.googlecode.com/files/fuzzer.jar
+ * http://subhodipbiswas.googlepages.com/gpsbabelgui.jar
+ * https://github.com/TrifanAdrian/LanecConnectorPlugin/releases/download/beta/LaneConnector.jar
+ * https://github.com/bularcasergiu/RemoveRedundantPoints/releases/download/alfa/Remove.redundant.points.jar
+ * https://github.com/andreimaneasa/kendzi3d/releases/download/alpha/kendzi3d_Improved_by_Andrei.jar
+ * https://github.com/FreemapSlovakia/freemapKaPor/raw/master/josmplugin/release/freemapkapor.jar
+ * https://github.com/aarthykc/changesetID/releases/download/3.0/changesetID.jar
+ * https://github.com/mossplix/kobomapper/releases/download/v1.0.0.2/kobomapper.jar
+ * https://wiki.openstreetmap.org/index.php/User:Subhodip/GSoC_Doc#GPSBabel_Plugin_For_JOSM_:
+ * https://wiki.openstreetmap.org/wiki/Intersect_way
+ * https://github.com/open-indoor/openindoor-josm-plugin/releases/download/v1.0.2/openindoor-1.0.2-josm.jar
+  * https://github.com/open-indoor/openindoor-josm-plugin/issues/2 and #23818
+
+=== Dead links ===
+ * http://manes.com.ar/Intersect_way.jar
+ * http://mappin.hp2.jp/josm/mappinonosm.jar
