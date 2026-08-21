@@ -12,3 +12,9 @@ lib/josm-custom.jar
 testbed/
 
 .DS_Store
+
+# Packaged build output, same artifact as the ignored *.jar
+*.jar.zip
+
+# Local debug dumps
+logs.txt
