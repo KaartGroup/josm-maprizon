@@ -21,19 +21,32 @@ import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JSlider;
+import javax.swing.JToggleButton;
 import javax.swing.KeyStroke;
 import javax.swing.SwingConstants;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
 import javax.swing.SwingUtilities;
 
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Cursor;
+import java.awt.Component;
+import java.awt.FlowLayout;
 import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseWheelEvent;
 import java.awt.image.BufferedImage;
+import java.awt.image.RescaleOp;
 import java.io.IOException;
 import java.net.URL;
 import java.util.Collections;
@@ -82,6 +95,14 @@ public final class MaprizonImageDialog extends ToggleDialog {
     /** Holds whichever viewer is active for the current frame (flat or panorama). */
     private final JPanel viewerHost = new JPanel(new BorderLayout());
     private final JLabel status = new JLabel(" ", SwingConstants.CENTER);
+
+    /** Camera-facing buttons, in the app's DirectionPicker order. Keyed by facing so
+     * the selected one can be filled when the shown frame changes. */
+    private final Map<String, JToggleButton> facingButtons = new LinkedHashMap<>();
+    private final JToggleButton adjustToggle = new JToggleButton("\u2600");
+    private final JPanel adjustRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 6, 2));
+    private final JSlider brightness = new JSlider(-100, 100, 0);
+    private final JSlider contrast = new JSlider(50, 200, 100);
     private final JButton prevButton = new JButton("← Prev");
     private final JButton nextButton = new JButton("Next →");
 
@@ -117,20 +138,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
         instance = this;
 
         JPanel root = new JPanel(new BorderLayout());
-        status.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
-        root.add(status, BorderLayout.NORTH);
         viewerHost.add(imagePanel, BorderLayout.CENTER);
         root.add(viewerHost, BorderLayout.CENTER);
-
-        JPanel nav = new JPanel(new BorderLayout());
-        nav.add(prevButton, BorderLayout.WEST);
-        nav.add(nextButton, BorderLayout.EAST);
-        root.add(nav, BorderLayout.SOUTH);
-
-        prevButton.addActionListener(e -> step(-1));
-        nextButton.addActionListener(e -> step(1));
-        prevButton.setEnabled(false);
-        nextButton.setEnabled(false);
+        root.add(buildControlBar(), BorderLayout.SOUTH);
 
         // Left/Right arrows walk the sequence when the panel has focus.
         InputMap im = root.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
@@ -152,6 +162,171 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
         createLayout(root, false, Collections.emptyList());
         ViewerAuth.getInstance().addLoginStateListener(authListener);
+    }
+
+    /**
+     * One control bar under the image, replacing the old split navigation.
+     *
+     * <p>THREE THINGS THIS FIXES, all reported together:
+     * <ul>
+     * <li><b>Prev/Next used to be pinned to opposite edges</b> ({@code BorderLayout}
+     * WEST/EAST), so widening the panel drove them further apart and stepping
+     * through a sequence meant crossing the whole dialog between clicks. They are
+     * centred now, and stay adjacent at every width.</li>
+     * <li><b>The facing row.</b> Switching cameras previously meant going back to
+     * the map, finding the same spot on another coloured ribbon and clicking it.
+     * The buttons resolve the counterpart frame at the same capture point through
+     * {@link ViewerApiClient#nearestFeature}, in the app's own order (360, Left,
+     * Front, Right) and the app's own colours.</li>
+     * <li><b>The frame's identity moved off the top.</b> It was a full-width label
+     * above the image; it is a line inside this bar now, so the image gets that
+     * height back.</li>
+     * </ul>
+     *
+     * <p>Brightness/contrast sit behind a toggle rather than always-on sliders: they
+     * are occasional (reading a sign in shadow), and this panel is often narrow.
+     */
+    private JComponent buildControlBar() {
+        JPanel bar = new JPanel();
+        bar.setLayout(new BoxLayout(bar, BoxLayout.Y_AXIS));
+
+        JPanel nav = new JPanel(new FlowLayout(FlowLayout.CENTER, 4, 2));
+        nav.add(prevButton);
+        for (String facing : FacingStyle.DEEP_LINK_FACINGS.stream()
+                .sorted(java.util.Comparator.comparingInt(MaprizonImageDialog::facingOrder))
+                .collect(java.util.stream.Collectors.toList())) {
+            JToggleButton b = new JToggleButton(facingLabel(facing));
+            b.setToolTipText("Show this spot on the " + facingLabel(facing) + " camera");
+            b.setMargin(new java.awt.Insets(1, 5, 1, 5));
+            b.setFocusable(false);
+            b.addActionListener(e -> swapFacing(facing));
+            facingButtons.put(facing, b);
+            nav.add(b);
+        }
+        adjustToggle.setToolTipText("Brightness and contrast");
+        adjustToggle.setMargin(new java.awt.Insets(1, 5, 1, 5));
+        adjustToggle.setFocusable(false);
+        adjustToggle.addActionListener(e -> {
+            adjustRow.setVisible(adjustToggle.isSelected());
+            adjustRow.getParent().revalidate();
+        });
+        nav.add(adjustToggle);
+        nav.add(nextButton);
+        bar.add(nav);
+
+        status.setBorder(BorderFactory.createEmptyBorder(0, 4, 2, 4));
+        status.setAlignmentX(Component.CENTER_ALIGNMENT);
+        bar.add(status);
+
+        brightness.setToolTipText("Brightness");
+        contrast.setToolTipText("Contrast");
+        brightness.setPreferredSize(new Dimension(90, 18));
+        contrast.setPreferredSize(new Dimension(90, 18));
+        brightness.addChangeListener(e -> applyAdjustments());
+        contrast.addChangeListener(e -> applyAdjustments());
+        JButton reset = new JButton("Reset");
+        reset.setMargin(new java.awt.Insets(1, 5, 1, 5));
+        reset.setFocusable(false);
+        reset.addActionListener(e -> {
+            brightness.setValue(0);
+            contrast.setValue(100);
+        });
+        adjustRow.add(new JLabel("\u2600"));
+        adjustRow.add(brightness);
+        adjustRow.add(new JLabel("\u25D1"));
+        adjustRow.add(contrast);
+        adjustRow.add(reset);
+        adjustRow.setVisible(false);
+        bar.add(adjustRow);
+
+        prevButton.addActionListener(e -> step(-1));
+        nextButton.addActionListener(e -> step(1));
+        prevButton.setEnabled(false);
+        nextButton.setEnabled(false);
+        return bar;
+    }
+
+    /** The app's DirectionPicker order: 360 first, then Left / Front / Right. */
+    private static int facingOrder(String facing) {
+        switch (facing) {
+            case FacingStyle.FACING_360: return 0;
+            case FacingStyle.LEFT: return 1;
+            case FacingStyle.FRONT: return 2;
+            case FacingStyle.RIGHT: return 3;
+            default: return 4;
+        }
+    }
+
+    private static String facingLabel(String facing) {
+        return FacingStyle.FACING_360.equals(facing) ? "360\u00b0"
+                : Character.toUpperCase(facing.charAt(0)) + facing.substring(1);
+    }
+
+    /** Mark the button for the facing now on screen, clear the rest. EDT.
+     *
+     * <p>The mark is a coloured UNDERLINE, not a filled background. A filled
+     * {@code JToggleButton} background is honoured by some look-and-feels and
+     * silently ignored by others — Aqua being the one most of this project's users
+     * are on — which would leave the selected camera indistinguishable on exactly
+     * the platform it was developed on. A border is drawn by every LAF, and it
+     * carries the facing's own colour, so the button agrees with the ribbon on the
+     * map. */
+    private void syncFacingButtons(String facing) {
+        for (Map.Entry<String, JToggleButton> e : facingButtons.entrySet()) {
+            boolean on = e.getKey().equalsIgnoreCase(facing);
+            JToggleButton b = e.getValue();
+            b.setSelected(on);
+            b.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createMatteBorder(0, 0, on ? 3 : 1, 0,
+                            on ? FacingStyle.colorFor(e.getKey()) : b.getBackground()),
+                    BorderFactory.createEmptyBorder(1, 5, on ? 0 : 2, 5)));
+        }
+    }
+
+    /**
+     * Show this same spot on another camera. Resolves the counterpart frame off the
+     * EDT, then reuses {@link #showForClickedFeature} so the swap lands in the new
+     * facing's own sequence and can be walked from there.
+     *
+     * <p>A miss is reported as a miss and a fault as a fault. They are different
+     * sentences on purpose: telling someone "no left camera here" when the request
+     * was rate-limited sends them looking for imagery that exists.
+     */
+    private void swapFacing(String targetFacing) {
+        if (frames.isEmpty() || index < 0 || index >= frames.size()) {
+            return;
+        }
+        final ImageryFeature current = frames.get(index);
+        if (targetFacing.equalsIgnoreCase(current.getFacing())) {
+            syncFacingButtons(current.getFacing());
+            return;
+        }
+        final MaprizonLayer layer = originatingLayer;
+        status.setText("Switching camera…");
+        exec.submit(() -> {
+            ImageryFeature match = ViewerApiClient.nearestFeature(current, targetFacing);
+            final String failure = ViewerApiClient.lastSwapFailure();
+            SwingUtilities.invokeLater(() -> {
+                if (match != null) {
+                    List<double[]> pts = match.getPoints();
+                    showForClickedFeature(match, pts.isEmpty() ? null : pts.get(0), layer);
+                } else {
+                    status.setText("<html>" + (failure == null
+                            ? "No " + facingLabel(targetFacing) + " camera at this spot"
+                            : "Couldn't switch camera — the imagery is still there, try again")
+                            + "</html>");
+                    syncFacingButtons(current.getFacing());
+                }
+            });
+        });
+    }
+
+    /** Push the slider values into both viewers and repaint. EDT. */
+    private void applyAdjustments() {
+        float scale = contrast.getValue() / 100f;
+        float offset = brightness.getValue();
+        imagePanel.setAdjustments(scale, offset);
+        panoPanel.setAdjustments(scale, offset);
     }
 
     public static MaprizonImageDialog getInstance() {
@@ -408,13 +583,17 @@ public final class MaprizonImageDialog extends ToggleDialog {
         if (originatingLayer != null) {
             originatingLayer.highlightFrame(f, coneBearing(frames, index), is360);
         }
+        // ONE compact line now that this sits in the bar rather than above the image:
+        // the facing is already shown by which button is lit, so it does not need
+        // repeating in text, and the timestamp no longer costs a second row.
         StringBuilder sb = new StringBuilder("<html>");
-        sb.append(f.getFacing()).append("  ·  ").append(index + 1).append(" / ").append(frames.size());
+        sb.append(index + 1).append(" / ").append(frames.size());
         if (f.getTimestamp() != null) {
-            sb.append("<br>").append(f.getTimestamp());
+            sb.append("  ·  ").append(f.getTimestamp());
         }
         sb.append("</html>");
         status.setText(sb.toString());
+        syncFacingButtons(f.getFacing());
         // Enabled at the edges too, because the edges are no longer dead ends:
         // stepping past them crosses into the adjacent sequence. Whether one
         // EXISTS is only knowable by asking the server, so offering the control and
@@ -516,14 +695,56 @@ public final class MaprizonImageDialog extends ToggleDialog {
         return ar >= 1.9 && ar <= 2.1;
     }
 
-    /** Downscale a panorama wider than {@link #MAX_PANO_WIDTH} (aspect-preserving,
-     * bilinear) so the frame cache can't exhaust the heap. */
+    /** Downscale a panorama wider than {@link #MAX_PANO_WIDTH} (aspect-preserving)
+     * so the frame cache can't exhaust the heap. Uses {@link #halveDownTo} rather
+     * than one big {@code drawImage} for the reason given there. */
     private static BufferedImage capPano(BufferedImage src) {
         if (src.getWidth() <= MAX_PANO_WIDTH) {
             return src;
         }
         int w = MAX_PANO_WIDTH;
         int h = (int) Math.round((double) src.getHeight() * MAX_PANO_WIDTH / src.getWidth());
+        return scaleTo(halveDownTo(src, w, h), w, h);
+    }
+
+    /** Repeatedly halve {@code src} while the next halving would still be at least
+     * the target size. The result is <b>not</b> the target size — it is the smallest
+     * power-of-two reduction that still covers it, ready for one final short step.
+     *
+     * <p>WHY THIS EXISTS. A single {@code drawImage} to the target size samples a
+     * 2x2 neighbourhood per output pixel however far it is reducing, so at the
+     * ratios this panel actually works at it reads ~4 of every 144 source pixels
+     * and the other 140 are simply not looked at. That is not a blur, it is
+     * undersampling: fine detail turns into speckle, which is what makes a
+     * destination sign unreadable in the panel while the same frame is legible in
+     * the browser (browsers downscale progressively).
+     *
+     * <p>Measured on a live 3840x2160 public frame (testbed/ImageQualityProbe.java),
+     * against an exact area-average of the same frame, RMSE per channel:
+     * <pre>
+     *   panel width   one-step bilinear   one-step bicubic   progressive halving
+     *   320                    14.30              15.48                  2.92
+     *   420                    14.15              15.08                  4.65
+     *   600                    11.77              12.79                  3.78
+     * </pre>
+     * Bicubic is <i>worse</i>, not better — the problem is which pixels get read,
+     * not how they are weighted. Halving reads all of them. */
+    private static BufferedImage halveDownTo(BufferedImage src, int targetW, int targetH) {
+        BufferedImage cur = src;
+        int w = src.getWidth();
+        int h = src.getHeight();
+        while (w / 2 >= targetW && h / 2 >= targetH && w / 2 > 0 && h / 2 > 0) {
+            w /= 2;
+            h /= 2;
+            cur = scaleTo(cur, w, h);
+        }
+        return cur;
+    }
+
+    private static BufferedImage scaleTo(BufferedImage src, int w, int h) {
+        if (src.getWidth() == w && src.getHeight() == h) {
+            return src;
+        }
         BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = dst.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
@@ -559,18 +780,210 @@ public final class MaprizonImageDialog extends ToggleDialog {
         super.destroy();
     }
 
-    /** Draws the current image scaled to fit while preserving aspect ratio. */
+    /** Brightness/contrast as a {@link RescaleOp}, shared by the flat and panorama
+     * viewers so one pair of sliders drives both.
+     *
+     * <p>Contrast is the multiplier and brightness the offset, which is exactly what
+     * {@code RescaleOp} applies — {@code out = in * scale + offset}. Returns null at
+     * the identity so the paint path can skip the whole filter rather than run a
+     * no-op over every pixel of every frame. */
+    static final class ImageAdjust {
+        private ImageAdjust() {
+        }
+
+        static RescaleOp opFor(float scale, float offset) {
+            if (Math.abs(scale - 1f) < 0.001f && Math.abs(offset) < 0.5f) {
+                return null;
+            }
+            return new RescaleOp(scale, offset, null);
+        }
+    }
+
+    /** Draws the current image fitted to the panel, and lets the user zoom in on it
+     * (scroll wheel) and pan around (click-drag) — the flat counterpart to
+     * {@link PanoramaPanel}'s look-around. Before this, only 360 frames could be
+     * magnified, so a sign readable in a front/left/right image at full size could
+     * not be read in the panel at all.
+     *
+     * <p>Zoom is a multiplier over the fit scale, so <b>1.0 is always "whole image
+     * visible"</b> and is the floor — zooming out past the panel would only add
+     * letterbox. Like the panorama's yaw, zoom and pan <b>persist across frames</b>:
+     * walking a sequence while zoomed into a sign keeps the sign magnified instead
+     * of dropping back to fit on every step. */
     private static final class ImagePanel extends JPanel {
         private transient BufferedImage image;
+
+        /** Multiplier over the fit-to-panel scale; 1.0 = fitted (the floor). */
+        private double zoom = 1.0;
+        /** Pan offset in panel pixels from the centred position; 0 when fitted. */
+        private double panX;
+        private double panY;
+
+        private static final double ZOOM_MAX = 8.0;
+        private static final double ZOOM_STEP = 1.15;
+
+        private int lastX;
+        private int lastY;
+
+        /** Progressively-halved copy of {@link #image} covering the current drawn
+         * size, and the image it was derived from. Rebuilt only when the drawn size
+         * crosses a power-of-two boundary, so panning and small zoom steps are free
+         * and a resize costs one rebuild. */
+        private transient BufferedImage mip;
+        private transient BufferedImage mipOf;
+
+        /** Brightness/contrast, or null when neither is off its default — the common
+         * case, which then costs nothing at all in paint. */
+        private transient RescaleOp adjust;
 
         ImagePanel() {
             setBackground(Color.DARK_GRAY);
             setPreferredSize(new Dimension(320, 240));
+            MouseAdapter ma = new MouseAdapter() {
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    lastX = e.getX();
+                    lastY = e.getY();
+                }
+
+                @Override
+                public void mouseDragged(MouseEvent e) {
+                    if (zoom > 1.0) {
+                        panX += e.getX() - lastX;
+                        panY += e.getY() - lastY;
+                        repaint();
+                    }
+                    lastX = e.getX();
+                    lastY = e.getY();
+                }
+
+                @Override
+                public void mouseClicked(MouseEvent e) {
+                    if (e.getClickCount() >= 2) {
+                        resetView();
+                    }
+                }
+
+                @Override
+                public void mouseWheelMoved(MouseWheelEvent e) {
+                    zoomAt(e.getX(), e.getY(), Math.pow(ZOOM_STEP, -e.getWheelRotation()));
+                }
+            };
+            addMouseListener(ma);
+            addMouseMotionListener(ma);
+            addMouseWheelListener(ma);
         }
 
         void setImage(BufferedImage img) {
             this.image = img;
+            this.mip = null;
+            this.mipOf = null;
             repaint();
+        }
+
+        void setAdjustments(float scale, float offset) {
+            this.adjust = ImageAdjust.opFor(scale, offset);
+            repaint();
+        }
+
+        /** The bitmap to draw from for a target of {@code drawnW x drawnH}: the
+         * source itself when drawing at or above 1:1, else a cached halved copy.
+         * See {@link MaprizonImageDialog#halveDownTo} for why the halving matters. */
+        private BufferedImage sourceFor(int drawnW, int drawnH) {
+            if (image == null) {
+                return null;
+            }
+            if (drawnW >= image.getWidth() || drawnH >= image.getHeight()) {
+                mip = null;
+                mipOf = null;
+                return image;
+            }
+            if (mip != null && mipOf == image
+                    && mip.getWidth() / 2 < drawnW && mip.getWidth() >= drawnW) {
+                return mip;
+            }
+            BufferedImage halved = halveDownTo(image, drawnW, drawnH);
+            if (halved == image) {
+                mip = null;
+                mipOf = null;
+                return image;
+            }
+            mip = halved;
+            mipOf = image;
+            return mip;
+        }
+
+        private void resetView() {
+            zoom = 1.0;
+            panX = panY = 0;
+            setCursor(Cursor.getDefaultCursor());
+            repaint();
+        }
+
+        /** Scale by {@code factor} about the panel point (mx, my), holding whatever
+         * pixel is under the cursor still — otherwise repeated wheel clicks walk the
+         * point of interest off-screen and the user has to chase it with the drag. */
+        private void zoomAt(int mx, int my, double factor) {
+            if (image == null) {
+                return;
+            }
+            double fit = fitScale();
+            if (fit <= 0) {
+                return;
+            }
+            double before = fit * zoom;
+            double after = fit * clamp(zoom * factor, 1.0, ZOOM_MAX);
+            if (after == before) {
+                return;
+            }
+            // Image coordinate currently under the cursor, held fixed across the change.
+            double ix = (mx - originX(before)) / before;
+            double iy = (my - originY(before)) / before;
+            zoom = after / fit;
+            panX = mx - ix * after - centredX(after);
+            panY = my - iy * after - centredY(after);
+            setCursor(zoom > 1.0 ? Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR)
+                    : Cursor.getDefaultCursor());
+            repaint();
+        }
+
+        private double fitScale() {
+            if (image == null || image.getWidth() <= 0 || image.getHeight() <= 0) {
+                return 0;
+            }
+            return Math.min((double) getWidth() / image.getWidth(),
+                    (double) getHeight() / image.getHeight());
+        }
+
+        private double centredX(double scale) {
+            return (getWidth() - image.getWidth() * scale) / 2;
+        }
+
+        private double centredY(double scale) {
+            return (getHeight() - image.getHeight() * scale) / 2;
+        }
+
+        private double originX(double scale) {
+            return centredX(scale) + clampPan(panX, getWidth(), image.getWidth() * scale);
+        }
+
+        private double originY(double scale) {
+            return centredY(scale) + clampPan(panY, getHeight(), image.getHeight() * scale);
+        }
+
+        /** Keep the drawn image covering the panel while it is larger than the panel,
+         * and pinned to centre while it is not, so the image can never be dragged off
+         * into empty background. */
+        private static double clampPan(double pan, int panelSize, double drawnSize) {
+            if (drawnSize <= panelSize) {
+                return 0;
+            }
+            double edge = (panelSize - drawnSize) / 2; // negative
+            return clamp(pan, edge, -edge);
+        }
+
+        private static double clamp(double v, double lo, double hi) {
+            return v < lo ? lo : (v > hi ? hi : v);
         }
 
         @Override
@@ -579,20 +992,55 @@ public final class MaprizonImageDialog extends ToggleDialog {
             if (image == null) {
                 return;
             }
+            double scale = fitScale() * zoom;
+            if (scale <= 0) {
+                return;
+            }
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
                     RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            int pw = getWidth();
-            int ph = getHeight();
-            int iw = image.getWidth();
-            int ih = image.getHeight();
-            if (iw <= 0 || ih <= 0) {
-                return;
+            int w = (int) Math.round(image.getWidth() * scale);
+            int h = (int) Math.round(image.getHeight() * scale);
+            // Re-clamp on every paint: the panel is resizable and the frames in a
+            // sequence are not all the same size, so a pan valid a moment ago may not be.
+            panX = clampPan(panX, getWidth(), w);
+            panY = clampPan(panY, getHeight(), h);
+            int ox = (int) Math.round(centredX(scale) + panX);
+            int oy = (int) Math.round(centredY(scale) + panY);
+            BufferedImage from = sourceFor(w, h);
+            if (adjust == null) {
+                g2.drawImage(from, ox, oy, w, h, null);
+            } else {
+                // Filter a PANEL-SIZED buffer, never the source: at 8x zoom the drawn
+                // image is many times the panel, and only what is on screen needs
+                // adjusting. Keeps the cost flat however far in the user has zoomed.
+                BufferedImage buf = new BufferedImage(getWidth(), getHeight(), BufferedImage.TYPE_INT_RGB);
+                Graphics2D bg = buf.createGraphics();
+                bg.setColor(getBackground());
+                bg.fillRect(0, 0, getWidth(), getHeight());
+                bg.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                        RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                bg.drawImage(from, ox, oy, w, h, null);
+                bg.dispose();
+                adjust.filter(buf, buf);
+                g2.drawImage(buf, 0, 0, null);
             }
-            double scale = Math.min((double) pw / iw, (double) ph / ih);
-            int w = (int) Math.round(iw * scale);
-            int h = (int) Math.round(ih * scale);
-            g2.drawImage(image, (pw - w) / 2, (ph - h) / 2, w, h, null);
+            if (zoom > 1.0) {
+                paintZoomBadge(g2);
+            }
+        }
+
+        private void paintZoomBadge(Graphics2D g) {
+            String msg = String.format("%.1f\u00d7 \u00b7 drag to pan \u00b7 double-click to fit", zoom);
+            g.setFont(g.getFont().deriveFont(Font.PLAIN, 11f));
+            FontMetrics fm = g.getFontMetrics();
+            int pad = 6;
+            int x = 8;
+            int y = getHeight() - fm.getHeight() - 8;
+            g.setColor(new Color(0, 0, 0, 150));
+            g.fillRoundRect(x, y, fm.stringWidth(msg) + 2 * pad, fm.getHeight() + pad, 8, 8);
+            g.setColor(Color.WHITE);
+            g.drawString(msg, x + pad, y + fm.getAscent() + pad / 2);
         }
     }
 }

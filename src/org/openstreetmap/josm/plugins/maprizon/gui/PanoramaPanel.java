@@ -9,11 +9,13 @@ import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
 import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferInt;
+import java.awt.image.RescaleOp;
 import java.util.function.DoubleConsumer;
 
 /**
@@ -47,6 +49,21 @@ public final class PanoramaPanel extends JPanel {
     private boolean dragging;
     private int lastX;
     private int lastY;
+
+    /** How long the last full-resolution render took, and the budget a drag frame is
+     * allowed — one 60 Hz frame with headroom for the rest of the paint. */
+    private long lastFullRenderNanos;
+    private static final long DRAG_BUDGET_NANOS = 12_000_000L;
+
+    /** Brightness/contrast from the dialog's control bar; null at the identity. The
+     * rendered frame is already viewport-sized, so filtering it is cheap whatever
+     * the source resolution. */
+    private RescaleOp adjust;
+
+    public void setAdjustments(float scale, float offset) {
+        this.adjust = MaprizonImageDialog.ImageAdjust.opFor(scale, offset);
+        repaint();
+    }
 
     /** Notified (on the EDT) with the current yaw in degrees whenever the view is
      * turned, so the on-map 360 cone can track where the user is looking. */
@@ -147,8 +164,32 @@ public final class PanoramaPanel extends JPanel {
             paintHint((Graphics2D) g);
             return;
         }
-        BufferedImage frame = render(dragging ? 2 : 1);
+        // RESOLUTION DURING A DRAG IS MEASURED, NOT ASSUMED. This used to be an
+        // unconditional half-resolution render whenever the mouse was down, which is
+        // what makes the panorama visibly pixelate while panning and snap clear on
+        // release. Timed against a 4096-wide source (testbed/PanoRenderTiming.java),
+        // median full-resolution render:
+        //     320x240  3.0 ms | 420x315  4.8 ms | 600x450  9.1 ms
+        //     800x600 15.8 ms | 1200x900 34.3 ms
+        // So at every size this panel is normally docked at, a full-res render fits
+        // inside a 60 Hz frame and the degradation bought nothing. Only a large
+        // undocked panel needs it — and machine speed varies, so the decision is made
+        // from THIS machine's last full-res render rather than from a size threshold.
+        boolean cheap = lastFullRenderNanos > 0 && lastFullRenderNanos <= DRAG_BUDGET_NANOS;
+        int div = dragging && !cheap ? 2 : 1;
+        long t0 = System.nanoTime();
+        BufferedImage frame = render(div);
+        if (div == 1) {
+            lastFullRenderNanos = System.nanoTime() - t0;
+        }
+        if (frame != null && adjust != null) {
+            adjust.filter(frame, frame);
+        }
         if (frame != null) {
+            // Bilinear on the way back up: when we DO fall back to half resolution the
+            // result is soft rather than blocky (the default is nearest-neighbour).
+            ((Graphics2D) g).setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                    RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             g.drawImage(frame, 0, 0, getWidth(), getHeight(), null);
         }
         // Small affordance so users know it's interactive.

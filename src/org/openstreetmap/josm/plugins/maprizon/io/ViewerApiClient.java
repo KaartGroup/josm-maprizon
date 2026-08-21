@@ -643,6 +643,123 @@ public final class ViewerApiClient {
         }
     }
 
+    /**
+     * The frame on {@code targetFacing} captured at the same point as {@code src} —
+     * the plugin half of the web client's camera switcher.
+     *
+     * <p>A multi-camera drive records front/left/right/360 from ONE vehicle at one
+     * moment, so "show me this spot on the left camera" is a real question with an
+     * exact answer, and the server already owns it: the same
+     * {@code sequence/nearest} route the viewer's DirectionPicker uses, with a
+     * JWT-exempt {@code sequence/public/nearest} twin. Nothing new was needed
+     * server-side, and {@link ImageryFeature} already carries every field the route
+     * matches on (trip, sequence index, timestamp, vehicle, day, batch).
+     *
+     * <p>Verified anonymously against production from a public {@code front} frame
+     * (testbed/FacingSwapProbe.java): left, right, 360 and front all answered HTTP
+     * 200 with the counterpart's own {@code img}, within a few metres of the source.
+     *
+     * <p>{@code trip_id} is REQUIRED by the route — it 400s without one — so a
+     * feature that carries none returns null here rather than issuing a call that
+     * cannot succeed.
+     *
+     * <p>{@code upload_batch_id} is sent to mirror the web client, but the server
+     * deliberately does NOT filter the cross-camera match by it: each facing is a
+     * separate upload with its own batch id, so filtering would find nothing. That
+     * is the opposite of the same-facing traversal rule above.
+     *
+     * <p>Returns null for "no frame of that facing here" (a normal 404 at the edge
+     * of a drive) and for every failure, so a caller simply stays put.
+     *
+     * <p>Blocking. Call OFF the EDT.
+     */
+    public static ImageryFeature nearestFeature(ImageryFeature src, String targetFacing) {
+        if (src == null || targetFacing == null || targetFacing.isEmpty()) {
+            return null;
+        }
+        List<double[]> pts = src.getPoints();
+        if (pts == null || pts.isEmpty()) {
+            return null;
+        }
+        if (src.getTripId() == null || src.getTripId().isEmpty()) {
+            Logging.warn("Maprizon: camera swap skipped — frame carries no trip_id");
+            return null;
+        }
+        double lon = pts.get(0)[0];
+        double lat = pts.get(0)[1];
+        String token = ViewerAuth.getInstance().getValidAccessToken();
+        String endpoint = token != null ? "sequence/nearest" : "sequence/public/nearest";
+        try {
+            JsonObjectBuilder body = Json.createObjectBuilder()
+                    .add("lat", lat)
+                    .add("lng", lon)
+                    .add("facing", targetFacing.toLowerCase(Locale.ROOT));
+            if (src.getFacing() != null) {
+                body.add("current_facing", src.getFacing().toLowerCase(Locale.ROOT));
+            }
+            addNumberOrString(body, "trip_id", src.getTripId());
+            if (src.getSequenceIndex() != null) {
+                addNumberOrString(body, "sequence_index", src.getSequenceIndex());
+            }
+            addIfPresent(body, "timestamp", src.getTimestamp());
+            addIfPresent(body, "vehicle_id", src.getVehicleId());
+            addIfPresent(body, "day_id", src.getDayId());
+            addIfPresent(body, "upload_batch_id", src.getUploadBatchId());
+
+            byte[] payload = body.build().toString().getBytes(StandardCharsets.UTF_8);
+            HttpClient client = HttpClient
+                    .create(new URL(API_BASE + endpoint), "POST")
+                    .setHeader("Content-Type", "application/json")
+                    .setHeader("Accept", "application/json")
+                    .setConnectTimeout(CONNECT_TIMEOUT_MS)
+                    .setReadTimeout(READ_TIMEOUT_MS)
+                    .setRequestBody(payload);
+            if (token != null) {
+                client.setHeader("Authorization", "Bearer " + token);
+            }
+            HttpClient.Response res = client.connect();
+            if (res.getResponseCode() != 200) {
+                // 404 is "no such facing here" and is expected; anything else is a
+                // fault. Both leave the user where they are, but only one of them
+                // should ever be reported as missing imagery — see lastSwapFailure.
+                lastSwapFailure = res.getResponseCode() == 404
+                        ? null
+                        : endpoint + " returned HTTP " + res.getResponseCode();
+                Logging.warn("Maprizon: " + endpoint + " returned HTTP " + res.getResponseCode());
+                return null;
+            }
+            lastSwapFailure = null;
+            String content = res.fetchContent();
+            try (JsonReader reader = Json.createReader(
+                    new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)))) {
+                JsonObject root = reader.readObject();
+                JsonObject feat = root.getJsonObject("feature");
+                return feat == null ? null : toFeature(feat, targetFacing);
+            }
+        } catch (IOException | RuntimeException e) {
+            lastSwapFailure = String.valueOf(e);
+            Logging.warn("Maprizon: nearestFeature failed: " + e);
+            return null;
+        }
+    }
+
+    /** Why the last camera swap returned nothing, or null when the answer was the
+     * honest "no frame of that facing here". Lets the dialog say "no left camera
+     * here" only when that is what happened, and "the request failed" otherwise —
+     * the same distinction the web client had to learn (a 429 spent a long time
+     * being reported as missing imagery). */
+    private static volatile String lastSwapFailure;
+
+    public static String lastSwapFailure() {
+        return lastSwapFailure;
+    }
+
+    private static void addIfPresent(JsonObjectBuilder b, String key, String value) {
+        if (value != null && !value.isEmpty()) {
+            b.add(key, value);
+        }
+    }
+
     private static ImageryFeature toFeature(JsonObject feat, String fallbackFacing) {
         JsonObject props = feat.getJsonObject("properties");
         if (props == null) {
