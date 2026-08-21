@@ -7,8 +7,16 @@ JOSM, and browse the actual photos without leaving the editor.
 
 - **Coverage layer**, colour-coded by camera facing, downloaded on demand for
   your current view (downloads accumulate as you pan/zoom around).
+- **Direction-of-travel arrows** along every coverage line, so you can tell
+  which way a drive went before selecting it.
 - **In-editor image viewer** — click a track to open its photo in a side panel
   and walk the sequence with the arrow keys or Prev/Next.
+- **Zoom and pan on every image** — scroll to zoom, drag to pan, double-click to
+  fit. The zoom is held as you step through a sequence, so you can follow a sign
+  from frame to frame.
+- **Camera switching** — jump to the same spot seen through another camera on
+  the same drive (360 / Left / Front / Right), without going back to the map.
+- **Brightness and contrast** adjustment for reading detail in shadow.
 - **360° panorama viewer** — 360 images open as an interactive panorama (drag to
   look around, scroll to zoom).
 - **View cone** on the map showing the selected image's camera direction.
@@ -24,6 +32,12 @@ JOSM, and browse the actual photos without leaving the editor.
 Once the plugin is listed, install it from within JOSM:
 **Preferences → Plugins**, search for **Maprizon**, tick it, and restart JOSM.
 
+Until then, install the jar by hand: drop `Maprizon.jar` into your JOSM plugins
+directory (`~/Library/JOSM/plugins` on macOS, `~/.josm/plugins` on Linux,
+`%APPDATA%\JOSM\plugins` on Windows) and restart JOSM. JOSM only reads plugin
+jars at startup, so a restart is required after every update — the download
+notification prints the running version so you can confirm which jar is live.
+
 ## Usage
 
 A **Maprizon** menu is added to the menu bar:
@@ -32,6 +46,10 @@ A **Maprizon** menu is added to the menu bar:
 - **Download Maprizon coverage (current view)** (`Alt+Shift+D`) — fetch coverage
   for the area you're looking at. Zoom in to your work area first; downloads
   accumulate, and the layer's right-click menu has "Clear downloaded coverage".
+- **Maprizon imagery for selected object** (`Alt+Shift+I`) — open Maprizon in
+  your browser, centred on the selected OSM object.
+- **Maprizon Login Diagnostics** — check login and private-tile access, and show
+  exactly what failed.
 - **Maprizon Help** — a quick in-app guide.
 
 Facings are colour-coded: **front** white, **left** red, **right** green,
@@ -39,8 +57,16 @@ Facings are colour-coded: **front** white, **left** red, **right** green,
 right-click menu.
 
 Click a coverage track to open its image in the **Maprizon Image** panel; a cone
-on the map marks the camera direction. To see private imagery, right-click the
-layer → **Log in to Viewer** (optional; anonymous access covers all public data).
+on the map marks the camera direction. The control bar under the image walks the
+sequence, switches cameras, and (behind the ☀ button) adjusts brightness and
+contrast. To see private imagery, right-click the layer → **Log in to Viewer**
+(optional; anonymous access covers all public data).
+
+## Troubleshooting
+
+The plugin writes to `maprizon.log` in your JOSM user data directory, beside
+`plugins/`. Failures land there rather than in the console — check it first, and
+include it when reporting a problem.
 
 ## Building from source
 
@@ -52,6 +78,8 @@ curl -fSL https://josm.openstreetmap.de/download/josm-tested.jar -o lib/josm-cus
 ant clean dist      # builds Maprizon.jar
 ant install         # copies it to your local JOSM plugins directory
 ```
+
+Restart JOSM after `ant install` — otherwise you are testing the previous build.
 
 ## License
 
