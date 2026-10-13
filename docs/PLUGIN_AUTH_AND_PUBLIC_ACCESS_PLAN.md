@@ -1,5 +1,11 @@
 # Maprizon JOSM Plugin — Auth & Public/Private Access Plan
 
+> **Superseded in part (2026-10-13):** tokens are **no longer persisted** to JOSM
+> prefs — login lasts one JOSM session and `ViewerAuth.purgePersistedTokens()`
+> deletes anything older builds wrote. Private **coverage** is also built: org
+> PMTiles are read via `GET tiles/sign` alongside the public archives. The code and
+> `CLAUDE.md` are authoritative; this file is the historical plan.
+
 **Status update (2026-07-14): the OPTIONAL LOGIN is now BUILT.** A JOSM user with a
 Maprizon account can log in (Auth0 Authorization Code + PKCE, loopback redirect) to
 view **private imagery** — signed image bytes + private sequences — on top of the
