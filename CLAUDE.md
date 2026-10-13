@@ -61,8 +61,11 @@ Version lives in two hand-synced places — bump both:
 `build.xml` (`plugin.version`, the copy that actually drives the manifest) and
 `plugin.properties` (documentation only, not read at build time). Everything the
 running plugin reports comes from the manifest via `MaprizonVersion`, so there is no
-third copy to forget. `PluginsSource-edited.txt` is the JOSM wiki plugin list this
-jar's download URL is registered in.
+third copy to forget. Then publish the jar (Spaces zip for the web app's download
+link, GitHub release for the plugin list) and raise `JOSM_MAPRIZON_VERSION` on the
+api — the full ritual, and which channel serves what today, is in `HANDOFF.md`.
+`PluginsSource-edited.txt` is a local draft of the JOSM wiki plugin list with this
+jar's entry added; it has **not** been submitted, so the plugin is not listed.
 
 ## Work intake (Trello)
 
@@ -89,8 +92,8 @@ things a standard read of it would get wrong:
   moves — the Auth0 dashboard prerequisite carried it into Complete and read as
   blocked work for a week.
 - There is **no Ready to Deploy**, because shipping here is a release, not a
-  deploy: bump the two hand-synced versions, build, and hand-install — the JOSM
-  plugin-directory listing is still an open card.
+  deploy: bump the two hand-synced versions, build, publish the jar (see
+  `HANDOFF.md`) — the JOSM plugin-directory listing is still an open card.
 
 Never auto-post to a card. Draft questions and summaries in chat first; post only
 what you're told to post. Before scoping any card, read the "Load-bearing
@@ -105,10 +108,13 @@ Package root: `org.openstreetmap.josm.plugins.maprizon`.
 
 ```
 MaprizonPlugin      entry point; builds a top-level "Maprizon" menu, registers MaprizonImageDialog per map frame
- actions/           JosmActions: toggle layer, download current view, diagnostics, help
+ MaprizonVersion    running version, read from the jar manifest
+ MaprizonLog        writes <JOSM user data dir>/maprizon.log
+ actions/           JosmActions: toggle layer, download current view, open selected object in Maprizon, diagnostics, help
  layer/MaprizonLayer   the JOSM Layer: download planning, paint, click->select, right-click menu (2.1k lines, the core)
  pmtiles/           PmtilesArchive + PmtilesDirectory + TileId + TileMath + PmtilesTileLoader (fetch & decode)
  io/ViewerApiClient    backend calls: sequences, image signing, tile presigning, diagnostics probes
+ io/PluginUpdateCheck  startup "newer version available" check against the api's version gate
  oauth/             ViewerAuth (PKCE token state) + LoginFlow (loopback listener)
  gui/               MaprizonImageDialog (docked photo panel) + PanoramaPanel (360 viewer)
  data/ImageryFeature   one decoded coverage feature + its Viewer properties
