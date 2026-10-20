@@ -220,7 +220,7 @@ For issues with the following plugin, please contact osm user UrSuS
 * https://github.com/watmildon/multipoly-gone/releases/latest/download/multipoly-gone.jar
 
 === by Kaart ===
-For issues with the following plugin, please contact Chris Gousset or Devin Markley at dev@kaart.com.
+For issues with the following plugin, please contact dev@kaart.com.
 * https://github.com/KaartGroup/josm-maprizon/releases/latest/download/Maprizon.jar
 
 == Disabled Plugins ==

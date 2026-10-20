@@ -60,10 +60,11 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Docked side panel that shows the actual street-level image for a selected
  * Maprizon coverage point, and lets the user walk the sequence (prev/next,
- * arrow keys). Anonymous by default (public images fetched straight from their
- * public-read DO Spaces URL); when the user is logged in (see
- * {@link org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth}), each image
- * is resolved through the viewer's signing endpoint so private imagery loads too.
+ * arrow keys). Every image is resolved through the viewer's signing endpoints
+ * ({@link ViewerApiClient#resolveImageUrl}): anonymously, published imagery comes
+ * back as its {@code maprizon-public} CDN URL; when the user is logged in (see
+ * {@link org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth}), the org's
+ * private imagery is presigned too.
  *
  * <p>360 (equirectangular) frames are shown in an interactive {@link PanoramaPanel}
  * (drag to look, scroll to zoom); everything else uses the flat {@link ImagePanel}.

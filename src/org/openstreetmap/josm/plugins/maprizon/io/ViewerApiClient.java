@@ -30,8 +30,9 @@ import java.util.Map;
  * Talks to the Kaart Viewer backend, transparently anonymous OR authenticated:
  * <ul>
  *   <li><b>Logged out (default):</b> hits the JWT-exempt
- *       {@code /sequence/public/by-feature} (server-gated to {@code trips.public}),
- *       and uses raw public image URLs — no login required.</li>
+ *       {@code /sequence/public/by-feature} (server-gated to published imagery,
+ *       {@code published_at IS NOT NULL}), and resolves image bytes via the
+ *       JWT-exempt {@code POST /images/public/sign} — no login required.</li>
  *   <li><b>Logged in (opt-in):</b> hits the authed {@code /sequence/by-feature}
  *       (serves private sequences) with a Bearer token, and resolves image bytes
  *       via {@code POST /images/sign} so private imagery loads.</li>
@@ -565,10 +566,11 @@ public final class ViewerApiClient {
     }
 
     /**
-     * Resolve a stored image URL to fetchable bytes. When logged in, mints a
-     * short-lived pre-signed URL via {@code POST /images/sign} (works for private
-     * <i>and</i> public imagery). When logged out — or on any failure — returns
-     * the raw URL unchanged, so public imagery still loads and nothing errors.
+     * Resolve a stored image URL to fetchable bytes, through {@code POST /images/sign}
+     * when logged in or the JWT-exempt {@code POST /images/public/sign} when not.
+     * The server answers an org-bucket URL with a short-lived presigned URL, and a
+     * published one with its unsigned {@code maprizon-public} CDN URL. On any
+     * failure, returns the raw URL unchanged rather than erroring.
      *
      * <p>Blocking (network); call off the EDT.
      */
@@ -597,6 +599,16 @@ public final class ViewerApiClient {
         // POST images/public/sign is the server's answer for exactly this, and
         // needs no token — verified anonymously against production, returning a
         // signed URL that serves the bytes.
+        //
+        // PUBLICATION V2 (viewer #1159, cutover finished 2026-10-19) moved every
+        // published image out of the org buckets into `maprizon-public`, and
+        // deleted the originals. Nothing here had to change, because the server
+        // owns the answer: a `maprizon-public` URL comes back as its CDN URL
+        // (public-read, unsigned, `expires_at: null`), and an OLD org-bucket URL
+        // still held by an older bake comes back as the CDN URL it moved to.
+        // Keep routing every image through these endpoints rather than
+        // special-casing hosts here. Re-verified 2026-10-20, logged out, by
+        // testbed/PublicImageAccessProbe.java: every public facing → 206.
         String endpoint = token != null ? "images/sign" : "images/public/sign";
         try {
             byte[] payload = Json.createObjectBuilder()
