@@ -5,6 +5,13 @@
 > deletes anything older builds wrote. Private **coverage** is also built: org
 > PMTiles are read via `GET tiles/sign` alongside the public archives. The code and
 > `CLAUDE.md` are authoritative; this file is the historical plan.
+>
+> **Status 2026-10-27:** public image access settled as this plan's option (c): the
+> plugin resolves every image through `POST images/public/sign` (logged out) or
+> `POST images/sign` (logged in). Since Maprizon's publication v2 (2026-10-19),
+> published images live in the `maprizon-public` bucket and come back as unsigned
+> CDN URLs; the public sequence endpoints gate on published imagery rather than
+> `trips.public`. See `ViewerApiClient.resolveImageUrl`.
 
 **Status update (2026-07-14): the OPTIONAL LOGIN is now BUILT.** A JOSM user with a
 Maprizon account can log in (Auth0 Authorization Code + PKCE, loopback redirect) to

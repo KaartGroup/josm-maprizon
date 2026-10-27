@@ -1,6 +1,6 @@
 # Handoff — Maprizon JOSM plugin
 
-State as of **2026-10-13**, written for whoever picks this repo up cold. The
+State as of **2026-10-13**, updated **2026-10-27** (release 1.0.27, plugin-list listing), written for whoever picks this repo up cold. The
 day-to-day developer guide (architecture, load-bearing invariants, probes) is
 [CLAUDE.md](CLAUDE.md); the user-facing guide is [README.md](README.md). This file
 covers what those two don't: where things live, how a release actually reaches
@@ -14,8 +14,8 @@ works with no account; an optional Auth0 login adds the user's organization's
 private imagery. Repo is **public**: `github.com/KaartGroup/josm-maprizon`,
 default branch `main`. License GPL-2.0-or-later.
 
-Current version: **1.0.26** (`build.xml` / `plugin.properties`, commit `2341a74`,
-2026-08-21). 1.0.23–1.0.25 were local builds that never shipped.
+Current version: **1.0.27** (`build.xml` / `plugin.properties`, commit `b49e625`,
+2026-10-20). 1.0.23–1.0.25 were local builds that never shipped.
 
 ## Build, run, test from a clean machine
 
@@ -27,8 +27,8 @@ ant clean dist      # -> Maprizon.jar at the repo root (gitignored)
 ant install         # copies it into the local JOSM plugins dir
 ```
 
-Verified 2026-10-13 from a fresh worktree: builds clean, manifest says
-`Plugin-Version: 1.0.26`, `Plugin-Mainversion: 19481`.
+Verified 2026-10-27 from a fresh worktree: builds clean, manifest says
+`Plugin-Version: 1.0.27`, `Plugin-Mainversion: 19481`.
 
 Restart JOSM after every install (it reads plugin jars only at startup). There
 are **no unit tests and no CI** — verification is throwaway probes in `testbed/`
@@ -37,13 +37,15 @@ pattern) plus a live run in JOSM. Failures go to `<JOSM user data dir>/maprizon.
 
 ## How a release reaches users
 
-There are three distribution channels, and **they are not in sync today**:
+There are three distribution channels, plus the server's version gate. As of
+2026-10-27 GitHub and the JOSM list serve 1.0.27; **the version gate still says
+1.0.26**, and the Spaces zip was not checked:
 
 | Channel | What it serves now | How it is updated |
 |---|---|---|
-| Maprizon web app download link (`GET /backend/api/upload/uploader_downloads`, env var `MAPRIZON_JOSM_PLUGIN_URL` on the api; client fallback in viewer `client/src/config.js`) | `Maprizon.jar.zip` on the Kaart DigitalOcean Spaces CDN (`kaart.sfo3.cdn.digitaloceanspaces.com/Uploader/`) | Zip the jar, upload to Spaces, update the env var if the path changes. **DO Spaces access needed.** |
-| GitHub Releases (`releases/latest/download/Maprizon.jar`) | **v1.0.1 (2026-07-17) — 25 versions behind** | `gh release create vX.Y.Z Maprizon.jar` |
-| Official JOSM plugin list (Preferences → Plugins) | **Not listed.** Verified against the live `PluginsSource` wiki page 2026-10-13. | See below. |
+| Maprizon web app download link (`GET /backend/api/upload/uploader_downloads`, env var `MAPRIZON_JOSM_PLUGIN_URL` on the api; client fallback in viewer `client/src/config.js`) | `Maprizon.jar.zip` on the Kaart DigitalOcean Spaces CDN (`kaart.sfo3.cdn.digitaloceanspaces.com/Uploader/`). Which version it holds was **not checked** on 2026-10-27. | Zip the jar, upload to Spaces, update the env var if the path changes. **DO Spaces access needed.** |
+| GitHub Releases (`releases/latest/download/Maprizon.jar`) | **v1.0.27 (2026-10-20)**, marked Latest | `gh release create vX.Y.Z Maprizon.jar` |
+| Official JOSM plugin list (Preferences → Plugins) | **Listed.** Verified 2026-10-27: the live `PluginsSource` wiki page has a "by Kaart" entry, and JOSM's plugin index serves `Plugin-Version: 1.0.27` | Automatic: JOSM follows `releases/latest`, so step 4's GitHub release is the update. See below. |
 
 Release steps:
 
@@ -59,19 +61,22 @@ Release steps:
    The in-plugin update check (`io/PluginUpdateCheck`) calls
    `POST /backend/api/upload/check_uploader_version` with
    `product: "josm-maprizon"` and only nags when the server's number is newer.
-   Live 2026-10-13 the server answers `status: ok` for 1.0.26.
+   **Not done for 1.0.27:** live 2026-10-27 the server still answers `status: ok`
+   for 1.0.26 and `current_version: "1.0.26"` (a 426 "out of date") for 1.0.27.
+   The plugin ignores that 426 because 1.0.26 is older than it, so nothing breaks,
+   but 1.0.26 users are not told 1.0.27 exists until the variable is raised.
 
-### Getting onto the official JOSM plugin list
+### The official JOSM plugin list
 
-Plan: the "external plugin" route — add one line under a Kaart heading to the
-JOSM wiki page `https://josm.openstreetmap.de/wiki/PluginsSource`, pointing at
+Done by the "external plugin" route: the JOSM wiki page
+`https://josm.openstreetmap.de/wiki/PluginsSource` has a "by Kaart" entry (contact
+dev@kaart.com, plus a repository line) pointing at
 `https://github.com/KaartGroup/josm-maprizon/releases/latest/download/Maprizon.jar`.
-JOSM re-reads that page about every 10 minutes. `PluginsSource-edited.txt` in
-this repo is a **local draft** of that page with the Kaart entry added (it names
-Chris Gousset and Devin Markley, both of whom have left or are leaving — change
-the contact before submitting). It has **not** been submitted. Before submitting,
-cut a current GitHub release (step 4), or the list will serve 1.0.1. Editing the
-wiki needs a JOSM wiki (OSM) account. Tracked as an open card on the Trello board.
+JOSM re-reads that page about every 10 minutes, so each new GitHub release reaches
+the list on its own. `PluginsSource-edited.txt` in this repo was the local draft of
+that edit; the live entry differs from it slightly (it adds "or open an issue on
+GitHub" and the repository line), and the wiki page is now the copy that counts.
+Who submitted it, and with which OSM account, is not recorded here.
 
 ## Coupling to the Maprizon API
 
@@ -82,7 +87,7 @@ Base URL is hardcoded: `https://app.maprizon.com/backend/api/` (`io/ViewerApiCli
 | `POST sequence/public/by-feature`, `POST sequence/by-feature` | none / Bearer | frames of a clicked track |
 | `GET sequence/public/adjacent/{id}/{dir}`, `GET sequence/adjacent/...` | none / Bearer | walking across sequence boundaries |
 | `POST sequence/public/nearest`, `POST sequence/nearest` | none / Bearer | camera switching |
-| `POST images/public/sign`, `POST images/sign` | none / Bearer | signed photo URLs (image bucket is private) |
+| `POST images/public/sign`, `POST images/sign` | none / Bearer | photo URLs: org imagery comes back presigned; published imagery comes back as its unsigned `maprizon-public` CDN URL (since Maprizon's publication v2, 2026-10-19; no plugin change was needed) |
 | `GET tiles/sign` | Bearer | presigned URLs for the org's private PMTiles |
 | `GET tiles/inspect` | Bearer | Login Diagnostics |
 | `POST upload/check_uploader_version` | none | update check |
@@ -101,8 +106,10 @@ server-side switch.
 
 - No open PRs. All pushed branches (`feat/direction-of-travel-arrows`,
   `feat/obj-info-link-and-update-check`, `feature/shareable-image-links`,
-  `fix/download-scope-overfetch`) are fully merged into `main` and can be ignored.
-- Not on the JOSM plugin list; GitHub "latest" release is stale (above).
+  `fix/download-scope-overfetch`, `docs/handoff-2026-10-13`) are fully merged into
+  `main` and can be ignored.
+- `JOSM_MAPRIZON_VERSION` on the api is still 1.0.26 (release step 5, above).
+- The Spaces zip behind the web app's download link was not checked for 1.0.27.
 - `docs/COVERAGE_AVAILABILITY_PLAN.md` — "where is there imagery?" overview;
   plan only, not approved.
 - `docs/VIEWER_OSM_PLUGIN_PLAN.md` — longer-term two-way JOSM↔Maprizon bridge;
@@ -116,6 +123,7 @@ server-side switch.
   `MAPRIZON_JOSM_PLUGIN_URL` on the api.
 - **Auth0** — admin on tenant `dev-p6r3cciondp4has2` to manage the plugin's
   native application (callback URLs, offline access).
-- **JOSM wiki / OSM account** — to edit `PluginsSource` (none is set up for Kaart yet).
+- **JOSM wiki / OSM account** — to change the `PluginsSource` entry. Find out which
+  account made the existing edit; if it is personal, plan to move to a Kaart one.
 - **Trello** — the Maprizon/JOSM Plugin board, https://trello.com/b/FSwceNHE.
 - `testbed/` probes live only on Chris's machine; ask for a copy if you want them.
