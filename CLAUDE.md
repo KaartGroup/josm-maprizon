@@ -64,8 +64,10 @@ running plugin reports comes from the manifest via `MaprizonVersion`, so there i
 third copy to forget. Then publish the jar (Spaces zip for the web app's download
 link, GitHub release for the plugin list) and raise `JOSM_MAPRIZON_VERSION` on the
 api — the full ritual, and which channel serves what today, is in `HANDOFF.md`.
-`PluginsSource-edited.txt` is a local draft of the JOSM wiki plugin list with this
-jar's entry added; it has **not** been submitted, so the plugin is not listed.
+The plugin **is** on the official JOSM plugin list (verified 2026-10-27): the wiki's
+`PluginsSource` page points at this repo's `releases/latest`, so the GitHub release
+is what JOSM users get. `PluginsSource-edited.txt` was the local draft of that edit;
+the live wiki entry is the one that counts.
 
 ## Work intake (Trello)
 
@@ -93,7 +95,7 @@ things a standard read of it would get wrong:
   blocked work for a week.
 - There is **no Ready to Deploy**, because shipping here is a release, not a
   deploy: bump the two hand-synced versions, build, publish the jar (see
-  `HANDOFF.md`) — the JOSM plugin-directory listing is still an open card.
+  `HANDOFF.md`). The plugin-list listing is done (see Releasing, above).
 
 Never auto-post to a card. Draft questions and summaries in chat first; post only
 what you're told to post. Before scoping any card, read the "Load-bearing
@@ -180,7 +182,8 @@ javadoc at each site explains why in detail. Read it before changing behavior.
 ### Cross-repo coupling
 
 The plugin mirrors the `viewer-2-0` web client deliberately: facing colors match
-`MapComponents.js`/`sequenceLayerStyles.js`, the scope choice mirrors
+`MapComponents.js`/`sequenceLayerStyles.js` (whose colours come from
+`client/src/theme/colorPalettes.js`), the scope choice mirrors
 `useMapTileUrls.js`, and the sign-refresh buffer mirrors its `SIGN_REFRESH_BUFFER_MS`.
 Server-owned values (notably the signing TTL in `server/flaskr/views/Tiles.py`) are
 deliberately **not** mirrored — `expiresAt` is always taken from the response.
