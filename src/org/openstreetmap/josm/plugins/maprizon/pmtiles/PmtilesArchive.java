@@ -309,12 +309,23 @@ public final class PmtilesArchive {
             if (code != HttpURLConnection.HTTP_PARTIAL && code != HttpURLConnection.HTTP_OK) {
                 throw new IOException("HTTP " + code + " for " + redact(url));
             }
+            // A 200 means the server (or a proxy/CDN in between) ignored Range and
+            // is sending the WHOLE archive. From offset 0 the first bytes are still
+            // exactly the range asked for; from anywhere else we would have to read
+            // through the archive to reach them, so refuse rather than do that.
+            if (code == HttpURLConnection.HTTP_OK && from > 0) {
+                throw new IOException("server ignored the Range header (HTTP 200) for " + redact(url));
+            }
+            // Never read past the range, whatever the status: an unbounded read of
+            // a 200 is how one tile request could pull in the entire archive.
+            long remaining = to - from + 1;
             try (InputStream in = c.getInputStream();
                  ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
                 byte[] buf = new byte[8192];
                 int n;
-                while ((n = in.read(buf)) != -1) {
+                while (remaining > 0 && (n = in.read(buf, 0, (int) Math.min(buf.length, remaining))) != -1) {
                     bos.write(buf, 0, n);
+                    remaining -= n;
                 }
                 return bos.toByteArray();
             }
