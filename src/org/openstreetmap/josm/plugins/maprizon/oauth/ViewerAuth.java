@@ -7,6 +7,7 @@ import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 
 import org.openstreetmap.josm.plugins.maprizon.MaprizonLog;
+import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient;
 import org.openstreetmap.josm.spi.preferences.Config;
 import org.openstreetmap.josm.tools.HttpClient;
 import org.openstreetmap.josm.tools.Logging;
@@ -585,6 +586,8 @@ public final class ViewerAuth {
                         email = who;
                     }
                 }
+            } else {
+                ViewerApiClient.discardBody(res); // releases the connection
             }
         } catch (IOException | RuntimeException e) {
             Logging.warn("Maprizon: /userinfo lookup failed (non-fatal): " + e);

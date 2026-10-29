@@ -412,6 +412,7 @@ public final class ViewerApiClient {
 
             if (res.getResponseCode() != 200) {
                 Logging.warn("Maprizon: " + endpoint + " returned HTTP " + res.getResponseCode());
+                discardBody(res);
                 return null;
             }
 
@@ -512,6 +513,9 @@ public final class ViewerApiClient {
             HttpClient.Response res = client.connect();
 
             int code = res.getResponseCode();
+            if (code != 200) {
+                discardBody(res);
+            }
             if (code == 404) {
                 // End of the drive, or the candidate was rejected as too far from
                 // the boundary. Both are legitimate "nothing there".
@@ -545,6 +549,21 @@ public final class ViewerApiClient {
 
     /** Parse a JSON object, or null if the text is absent/not an object. Used for
      * ERROR bodies, where the shape varies by which layer rejected the request. */
+    /**
+     * Read and drop a body we are not going to use. {@code fetchContent()} reads
+     * it to the end and closes the stream, which is what returns the connection
+     * to the JDK's keep-alive pool; an unread error body leaves it open.
+     * Deliberately NOT {@code Response.disconnect()}: JOSM's sleeps 100 ms and
+     * drops the socket, which would slow and de-pool every error reply.
+     */
+    public static void discardBody(HttpClient.Response res) {
+        try {
+            res.fetchContent();
+        } catch (IOException ignored) {
+            // The status was already read; an unreadable body changes nothing.
+        }
+    }
+
     private static JsonObject parseOrNull(String content) {
         if (content == null || content.isEmpty()) {
             return null;
@@ -631,6 +650,7 @@ public final class ViewerApiClient {
                 // 403 = withheld/not-servable; anything else = transient. Fall back
                 // to raw (which may itself 403 for private, surfaced to the user).
                 Logging.warn("Maprizon: " + endpoint + " returned HTTP " + res.getResponseCode());
+                discardBody(res);
                 return rawUrl;
             }
             try (JsonReader reader = Json.createReader(
@@ -738,6 +758,7 @@ public final class ViewerApiClient {
                         ? null
                         : endpoint + " returned HTTP " + res.getResponseCode();
                 Logging.warn("Maprizon: " + endpoint + " returned HTTP " + res.getResponseCode());
+                discardBody(res);
                 return null;
             }
             lastSwapFailure = null;

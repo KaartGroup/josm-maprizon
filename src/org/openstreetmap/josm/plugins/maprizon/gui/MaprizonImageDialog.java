@@ -47,6 +47,7 @@ import java.awt.event.MouseWheelEvent;
 import java.awt.image.BufferedImage;
 import java.awt.image.RescaleOp;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -772,9 +773,13 @@ public final class MaprizonImageDialog extends ToggleDialog {
                     .connect();
             if (res.getResponseCode() != 200) {
                 Logging.warn("Maprizon: image fetch HTTP " + res.getResponseCode() + " for " + redact(url));
+                ViewerApiClient.discardBody(res);
                 return null;
             }
-            return ImageIO.read(res.getContent());
+            // ImageIO.read(InputStream) does not close the stream it is given.
+            try (InputStream in = res.getContent()) {
+                return ImageIO.read(in);
+            }
         } catch (IOException | RuntimeException e) {
             Logging.warn("Maprizon: image fetch failed: " + redact(String.valueOf(e)));
             return null;
