@@ -22,6 +22,7 @@ import org.openstreetmap.josm.plugins.maprizon.pmtiles.PmtilesTileLoader;
 import org.openstreetmap.josm.plugins.maprizon.pmtiles.TileMath;
 import org.openstreetmap.josm.tools.ImageProvider;
 import org.openstreetmap.josm.tools.Logging;
+import org.openstreetmap.josm.tools.Utils;
 
 import javax.swing.AbstractAction;
 import javax.swing.Action;
@@ -477,6 +478,17 @@ public class MaprizonLayer extends Layer implements MouseListener {
             clearLedgers();
         } else {
             clearCoverage();
+            // Logged out by Auth0, not by the user: say so, or their private
+            // imagery just vanishes mid-session with nothing indicating why.
+            String ended = ViewerAuth.getInstance().takeSessionEndNotice();
+            if (ended != null) {
+                new Notification("<html><b>Maprizon: you have been logged out</b><br>"
+                        + "Your session ended (" + Utils.escapeReservedCharactersHTML(ended) + "),<br>"
+                        + "so only PUBLIC imagery will load. Log in again for private imagery.</html>")
+                        .setIcon(JOptionPane.WARNING_MESSAGE)
+                        .setDuration(Notification.TIME_LONG)
+                        .show();
+            }
         }
         setName(audienceLayerName());
         redownloadCurrentViewQuietly();

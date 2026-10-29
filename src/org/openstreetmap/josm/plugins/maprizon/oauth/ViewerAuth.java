@@ -6,6 +6,7 @@ import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 
+import org.openstreetmap.josm.plugins.maprizon.MaprizonLog;
 import org.openstreetmap.josm.spi.preferences.Config;
 import org.openstreetmap.josm.tools.HttpClient;
 import org.openstreetmap.josm.tools.Logging;
@@ -120,13 +121,20 @@ public final class ViewerAuth {
     private String email = "";
     private String orgId = "";
     /**
-     * Bumped on logout. A refresh already in flight when the user logs out
-     * carries the old generation and its result is DISCARDED — otherwise the
-     * response would silently re-establish the session a moment after the user
-     * logged out, which is the same "logged in when I thought I wasn't" failure
-     * this class now exists to prevent.
+     * Bumped whenever a session ends OR begins (logout, a session Auth0 has
+     * ended, a fresh interactive login). A refresh already in flight carries the
+     * old generation and its result is DISCARDED — otherwise it would silently
+     * re-establish a session the user just logged out of, or overwrite a newer
+     * login (possibly another account's) with the previous session's tokens.
      */
     private long sessionGeneration;
+    /**
+     * Why the session ended WITHOUT the user asking (Auth0 rejected the refresh
+     * token, or the access token expired with no refresh token). Null otherwise.
+     * Taken once by {@link #takeSessionEndNotice()} so the user is told why their
+     * private imagery disappeared instead of it silently going.
+     */
+    private String sessionEndNotice;
 
     private ViewerAuth() {
         purgePersistedTokens();
@@ -267,12 +275,8 @@ public final class ViewerAuth {
     /** Forget all credentials. Fires a state-change so callers can refresh UI/imagery. */
     public void logout() {
         synchronized (stateLock) {
-            accessToken = "";
-            refreshToken = "";
-            expiresAtEpochSeconds = 0L;
-            email = "";
-            orgId = "";
-            sessionGeneration++;
+            clearCredentials();
+            sessionEndNotice = null; // the user asked; nothing to explain
         }
         // Belt and braces: an install upgrading mid-session may still carry the old
         // on-disk copy, and "log out" must not leave a credential behind anywhere.
@@ -280,32 +284,98 @@ public final class ViewerAuth {
         fireChanged();
     }
 
+    /**
+     * The reason the session last ended without the user logging out, or null —
+     * and clears it, so exactly one listener shows it. For the "you were logged
+     * out" notice; the reason itself is already in {@code maprizon.log}.
+     */
+    public String takeSessionEndNotice() {
+        synchronized (stateLock) {
+            String notice = sessionEndNotice;
+            sessionEndNotice = null;
+            return notice;
+        }
+    }
+
+    /** Caller must hold {@link #stateLock}. */
+    private void clearCredentials() {
+        accessToken = "";
+        refreshToken = "";
+        expiresAtEpochSeconds = 0L;
+        email = "";
+        orgId = "";
+        sessionGeneration++;
+    }
+
+    /**
+     * End a session that can no longer produce a token, unless it has already
+     * ended or been replaced by a newer login while we were deciding.
+     *
+     * @return true if this call ended it — the caller must then
+     *         {@link #fireChanged()}, outside every lock.
+     */
+    private boolean endSessionIfCurrent(long generation, String reason) {
+        synchronized (stateLock) {
+            if (sessionGeneration != generation) {
+                return false;
+            }
+            clearCredentials();
+            sessionEndNotice = reason;
+        }
+        MaprizonLog.warn("session ended — " + reason);
+        return true;
+    }
+
     // ------------------------------------------------------ token accessor
 
     /**
      * Return a currently-valid access token, refreshing silently if it is
      * expired (or about to be) and a refresh token is available. Returns
-     * {@code null} when not logged in or when a refresh fails — callers MUST
-     * treat null as "anonymous" and fall back to the public path, never error.
+     * {@code null} when not logged in or when no valid token can be had —
+     * callers MUST treat null as "anonymous" and fall back to the public path,
+     * never error.
+     *
+     * <p>A session that can never produce a token again is ENDED here, exactly
+     * as a logout would (credentials cleared, listeners fired): Auth0 rejecting
+     * the refresh token, or an expired access token with no refresh token. Left
+     * in place, {@link #isLoggedIn()} stayed true, the loader kept asking for
+     * the org scope, and every tile and image retried a refresh that could only
+     * fail again. A transient failure (network, timeout, 5xx, 429) keeps the
+     * session: the next call simply tries again.
      *
      * <p>Blocking (may do a token-refresh HTTP call); call off the EDT.
      */
     public String getValidAccessToken() {
         String access;
         String refresh;
+        long expiresAt;
         long generation;
         synchronized (stateLock) {
             access = accessToken;
             refresh = refreshToken;
+            expiresAt = expiresAtEpochSeconds;
             generation = sessionGeneration;
-            if (isFresh(access, expiresAtEpochSeconds)) {
+            if (isFresh(access, expiresAt)) {
                 return access;
             }
         }
         if (refresh.isEmpty()) {
-            return access.isEmpty() ? null : access;
+            if (access.isEmpty()) {
+                return null;
+            }
+            if (System.currentTimeMillis() / 1000L < expiresAt) {
+                // Inside the refresh skew but still valid, and nothing to refresh
+                // it with: use it while it lasts.
+                return access;
+            }
+            if (endSessionIfCurrent(generation, "the access token expired and there is no refresh token")) {
+                fireChanged();
+            }
+            return null;
         }
 
+        String token = null;
+        boolean ended = false;
         // One refresh at a time. Held across HTTP, which is why the EDT-facing
         // accessors above use stateLock instead of this.
         synchronized (refreshLock) {
@@ -315,17 +385,24 @@ public final class ViewerAuth {
                     return accessToken;
                 }
                 if (sessionGeneration != generation) {
-                    return null; // logged out while we waited
+                    return null; // logged out (or logged in afresh) while we waited
                 }
             }
             try {
                 TokenResponse tr = refresh(refresh);
-                return storeTokensIfCurrent(tr, generation) ? tr.accessToken : null;
+                token = storeTokensIfCurrent(tr, generation) ? tr.accessToken : null;
+            } catch (TokenRejectedException e) {
+                ended = endSessionIfCurrent(generation, "Auth0 rejected the refresh token ("
+                        + e.getMessage() + ")");
             } catch (IOException e) {
-                Logging.warn("Maprizon: token refresh failed, treating as logged out: " + e);
-                return null;
+                MaprizonLog.warn("token refresh failed, keeping the session to retry: " + e);
             }
         }
+        // Outside refreshLock: listeners may call straight back into this class.
+        if (ended) {
+            fireChanged();
+        }
+        return token;
     }
 
     /** Caller must hold {@link #stateLock} for the expiry it passes in. */
@@ -406,9 +483,13 @@ public final class ViewerAuth {
     }
 
     /** In-memory only, by design — see the class javadoc. Unconditional: used by
-     * {@link #exchangeCode}, where a fresh interactive login IS the new session. */
+     * {@link #exchangeCode}, where a fresh interactive login IS the new session —
+     * so it starts a new generation, and a refresh still in flight from the
+     * previous session is discarded instead of overwriting these tokens. */
     private void storeTokens(TokenResponse tr) {
         synchronized (stateLock) {
+            sessionGeneration++;
+            sessionEndNotice = null;
             applyTokens(tr);
         }
     }
@@ -422,7 +503,7 @@ public final class ViewerAuth {
     private boolean storeTokensIfCurrent(TokenResponse tr, long generation) {
         synchronized (stateLock) {
             if (sessionGeneration != generation) {
-                Logging.info("Maprizon: discarding refreshed token — logged out mid-refresh");
+                Logging.info("Maprizon: discarding refreshed token — the session ended or was replaced mid-refresh");
                 return false;
             }
             applyTokens(tr);
@@ -518,12 +599,43 @@ public final class ViewerAuth {
                 .setRequestBody(encodeForm(form))
                 .connect();
         String content = res.fetchContent();
-        if (res.getResponseCode() != 200) {
+        int status = res.getResponseCode();
+        if (status != 200) {
             JsonObject err = parse(content);
-            String msg = err != null ? err.getString("error_description", err.getString("error", content)) : content;
-            throw new IOException("HTTP " + res.getResponseCode() + ": " + msg);
+            String oauthError = err != null ? err.getString("error", "") : "";
+            String msg = err != null ? err.getString("error_description", oauthError) : content;
+            if (msg == null || msg.isEmpty()) {
+                msg = String.valueOf(content);
+            }
+            if (msg.length() > 200) {
+                msg = msg.substring(0, 200) + "…"; // e.g. a proxy's HTML error page
+            }
+            String detail = "HTTP " + status + ": " + msg;
+            // Measured against the live tenant: a dead refresh token is
+            // 403 {"error":"invalid_grant","error_description":"Unknown or invalid
+            // refresh token."} (testbed/Auth0RefreshShapeProbe). A 4xx carrying an
+            // OAuth error body is Auth0 refusing THIS request, which retrying cannot
+            // change — except 408 and 429, which are about timing, not the
+            // credential. A 4xx WITHOUT one (a captive portal or proxy page) is not
+            // Auth0's verdict, so it is treated as transient.
+            if (status >= 400 && status < 500 && status != 408 && status != 429
+                    && !oauthError.isEmpty()) {
+                throw new TokenRejectedException(detail);
+            }
+            throw new IOException(detail);
         }
         return parse(content);
+    }
+
+    /** Auth0 refused the request outright (a 4xx other than 408/429, with an OAuth
+     * error body), as opposed to a network, proxy or server failure that may
+     * succeed on retry. */
+    static final class TokenRejectedException extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        TokenRejectedException(String message) {
+            super(message);
+        }
     }
 
     private static byte[] encodeForm(Map<String, String> form) {
