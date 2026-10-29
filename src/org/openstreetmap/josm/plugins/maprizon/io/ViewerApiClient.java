@@ -547,8 +547,6 @@ public final class ViewerApiClient {
         }
     }
 
-    /** Parse a JSON object, or null if the text is absent/not an object. Used for
-     * ERROR bodies, where the shape varies by which layer rejected the request. */
     /**
      * Read and drop a body we are not going to use. {@code fetchContent()} reads
      * it to the end and closes the stream, which is what returns the connection
@@ -564,6 +562,8 @@ public final class ViewerApiClient {
         }
     }
 
+    /** Parse a JSON object, or null if the text is absent/not an object. Used for
+     * ERROR bodies, where the shape varies by which layer rejected the request. */
     private static JsonObject parseOrNull(String content) {
         if (content == null || content.isEmpty()) {
             return null;
