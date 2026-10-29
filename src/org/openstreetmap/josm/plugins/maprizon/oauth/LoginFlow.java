@@ -54,6 +54,8 @@ public final class LoginFlow {
     private static final int[] PORTS = {8765, 8766, 8767};
     private static final String CALLBACK_PATH = "/maprizon-callback";
     private static final int LOGIN_TIMEOUT_MS = 180_000; // 3 min to complete in-browser
+    /** How long one accepted connection may take to send its request line. */
+    private static final int REQUEST_READ_TIMEOUT_MS = 5_000;
 
     private LoginFlow() {
     }
@@ -103,8 +105,8 @@ public final class LoginFlow {
 
         Thread worker = new Thread(() -> {
             try {
-                srv.setSoTimeout(LOGIN_TIMEOUT_MS);
-                Map<String, String> params = awaitCallback(srv);
+                Map<String, String> params = awaitCallback(srv,
+                        System.currentTimeMillis() + LOGIN_TIMEOUT_MS);
                 String returnedState = params.get("state");
                 String code = params.get("code");
                 String error = params.get("error");
@@ -147,32 +149,83 @@ public final class LoginFlow {
         openBrowser(authorizeUrl);
     }
 
-    /** Accept one HTTP request on the loopback socket, reply with a friendly page,
-     * and return its query params (code/state/error). */
-    private static Map<String, String> awaitCallback(ServerSocket srv) throws IOException {
-        try (Socket socket = srv.accept()) {
-            BufferedReader in = new BufferedReader(
-                    new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-            String requestLine = in.readLine(); // e.g. "GET /maprizon-callback?code=..&state=.. HTTP/1.1"
-            Map<String, String> params = parseQuery(requestLine);
-
-            boolean ok = params.containsKey("code") && !params.containsKey("error");
-            String body = "<!doctype html><html><head><meta charset='utf-8'><title>Maprizon</title></head>"
-                    + "<body style='font-family:sans-serif;text-align:center;padding:3em'>"
-                    + (ok
-                        ? "<h2>You're logged in to Maprizon.</h2><p>You can close this tab and return to JOSM.</p>"
-                        : "<h2>Maprizon login was not completed.</h2><p>You can close this tab and try again in JOSM.</p>")
-                    + "</body></html>";
-            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-            OutputStream out = socket.getOutputStream();
-            out.write(("HTTP/1.1 200 OK\r\n"
-                    + "Content-Type: text/html; charset=utf-8\r\n"
-                    + "Content-Length: " + bytes.length + "\r\n"
-                    + "Connection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
-            out.write(bytes);
-            out.flush();
-            return params;
+    /**
+     * Wait for the browser's request to {@link #CALLBACK_PATH} on the loopback
+     * socket, reply with a friendly page, and return its query params
+     * (code/state/error).
+     *
+     * <p>Loops rather than taking the first connection: browsers also open
+     * speculative connections that send nothing, and ask for {@code /favicon.ico}.
+     * Taking the first one hung the login on a silent connection (no read
+     * timeout, and Cancel only closes the server socket) or failed it as a
+     * "state mismatch" on the favicon. Each connection now gets
+     * {@link #REQUEST_READ_TIMEOUT_MS} to speak; anything that is not the
+     * callback gets a 404 and the wait continues until {@code deadlineMs}.
+     *
+     * @throws SocketTimeoutException when the deadline passes
+     * @throws SocketException when the server socket is closed (Cancel)
+     */
+    private static Map<String, String> awaitCallback(ServerSocket srv, long deadlineMs) throws IOException {
+        while (true) {
+            long remaining = deadlineMs - System.currentTimeMillis();
+            if (remaining <= 0) {
+                throw new SocketTimeoutException("no login callback before the deadline");
+            }
+            srv.setSoTimeout((int) remaining);
+            try (Socket socket = srv.accept()) {
+                socket.setSoTimeout((int) Math.min(remaining, REQUEST_READ_TIMEOUT_MS));
+                String requestLine;
+                try {
+                    BufferedReader in = new BufferedReader(
+                            new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+                    requestLine = in.readLine(); // e.g. "GET /maprizon-callback?code=..&state=.. HTTP/1.1"
+                } catch (SocketTimeoutException silent) {
+                    continue; // a preconnect that never spoke; not the callback
+                }
+                if (!CALLBACK_PATH.equals(requestPath(requestLine))) {
+                    reply(socket, "404 Not Found", "");
+                    continue;
+                }
+                return answerCallback(socket, parseQuery(requestLine));
+            }
         }
+    }
+
+    /** The path of an HTTP request line, without its query string; null if unparseable. */
+    private static String requestPath(String requestLine) {
+        if (requestLine == null) {
+            return null;
+        }
+        String[] parts = requestLine.split(" ");
+        if (parts.length < 2) {
+            return null;
+        }
+        int q = parts[1].indexOf('?');
+        return q < 0 ? parts[1] : parts[1].substring(0, q);
+    }
+
+    /** Reply to the callback request with a friendly page and hand back its params. */
+    private static Map<String, String> answerCallback(Socket socket, Map<String, String> params) throws IOException {
+        boolean ok = params.containsKey("code") && !params.containsKey("error");
+        String body = "<!doctype html><html><head><meta charset='utf-8'><title>Maprizon</title></head>"
+                + "<body style='font-family:sans-serif;text-align:center;padding:3em'>"
+                + (ok
+                    ? "<h2>You're logged in to Maprizon.</h2><p>You can close this tab and return to JOSM.</p>"
+                    : "<h2>Maprizon login was not completed.</h2><p>You can close this tab and try again in JOSM.</p>")
+                + "</body></html>";
+        reply(socket, "200 OK", body);
+        return params;
+    }
+
+    private static void reply(Socket socket, String status, String html) throws IOException {
+        byte[] bytes = html.getBytes(StandardCharsets.UTF_8);
+        OutputStream out = socket.getOutputStream();
+        out.write(("HTTP/1.1 " + status + "\r\n"
+                + "Content-Type: text/html; charset=utf-8\r\n"
+                + "Content-Length: " + bytes.length + "\r\n"
+                + "Connection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+        out.write(bytes);
+        out.flush();
     }
 
     private static Map<String, String> parseQuery(String requestLine) {
