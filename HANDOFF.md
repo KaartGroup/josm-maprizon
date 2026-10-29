@@ -14,8 +14,8 @@ works with no account; an optional Auth0 login adds the user's organization's
 private imagery. Repo is **public**: `github.com/KaartGroup/josm-maprizon`,
 default branch `main`. License GPL-2.0-or-later.
 
-Current version: **1.0.27** (`build.xml` / `plugin.properties`, commit `b49e625`,
-2026-10-20). 1.0.23–1.0.25 were local builds that never shipped.
+Current version: **1.0.28** (`build.xml` / `plugin.properties`, the `Release 1.0.28`
+commit, 2026-10-29). 1.0.23–1.0.25 were local builds that never shipped.
 
 ## Build, run, test from a clean machine
 
@@ -28,7 +28,7 @@ ant install         # copies it into the local JOSM plugins dir
 ```
 
 Verified 2026-10-29 (JDK 21, `release="17"`): builds clean, manifest says
-`Plugin-Version: 1.0.27`, `Plugin-Mainversion: 19481`, classes are Java 17 bytecode.
+`Plugin-Version: 1.0.28`, `Plugin-Mainversion: 19481`, classes are Java 17 bytecode.
 
 Restart JOSM after every install (it reads plugin jars only at startup). There
 are **no unit tests and no CI** — verification is throwaway probes in `testbed/`
