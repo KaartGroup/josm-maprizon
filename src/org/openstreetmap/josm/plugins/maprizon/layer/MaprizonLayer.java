@@ -177,9 +177,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
     /** Overview cells are drawn this many zooms FINER than the screen, so each
      * is 256 / 2^3 = 32 px across: legible as a grid, small enough to aim at. */
     private static final int AVAILABILITY_CELL_ZOOM_OFFSET = 3;
-    /** Above this screen zoom a cell is 512 px or more — more wash than signal,
-     * and the coverage lines themselves are the answer there. */
-    private static final int AVAILABILITY_MAX_SCREEN_ZOOM = 13;
+    /** Above this screen zoom a cell is 256 px or more. Seen in a real JOSM at
+     * screen zoom 13 (2026-10-29): four 512 px cells washed the whole map, so the
+     * cells stop here and the coverage lines take over. */
+    private static final int AVAILABILITY_MAX_SCREEN_ZOOM = 11;
     /** Cap on tile ids read per facing and scope for the overview; the directory
      * is untrusted input. Public archives hold ~70 ids at z<=12. */
     private static final int AVAILABILITY_MAX_TILES = 200_000;
@@ -635,7 +636,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         // 0. availability cells, beneath everything: where imagery exists, whether
         // or not it has been downloaded.
         if (showAvailability) {
-            paintAvailability(g, mv, bbox, rawZoom);
+            paintAvailability(g, mv, rawZoom);
         }
 
         // STRICT Z-ORDER, one pass per layer of the stack, over a projection made
@@ -815,7 +816,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * it, as they do from the lines. Nothing past
      * {@link #AVAILABILITY_MAX_SCREEN_ZOOM}.
      */
-    private void paintAvailability(Graphics2D g, MapView mv, Bounds bbox, int rawZoom) {
+    private void paintAvailability(Graphics2D g, MapView mv, int rawZoom) {
         CoverageIndex index = availability;
         if (index == null || rawZoom > AVAILABILITY_MAX_SCREEN_ZOOM) {
             return;
@@ -828,24 +829,26 @@ public class MaprizonLayer extends Layer implements MouseListener {
         Color c = FacingStyle.AVAILABILITY;
         Color fill = new Color(c.getRed(), c.getGreen(), c.getBlue(), 70);
         Color edge = new Color(c.getRed(), c.getGreen(), c.getBlue(), 200);
+        java.awt.Rectangle screen = new java.awt.Rectangle(0, 0, mv.getWidth(), mv.getHeight());
         g.setStroke(new BasicStroke(1f));
         for (long packed : cells) {
             long x = CoverageIndex.unpackX(packed);
             long y = CoverageIndex.unpackY(packed);
             double[] nw = TileId.tileNorthWestLonLat(cz, x, y);
             double[] se = TileId.tileNorthWestLonLat(cz, x + 1, y + 1);
-            // Cull off-screen cells before projecting: a zoomed-out world view can
-            // hold every cell, but only the visible ones cost anything.
-            if (se[0] < bbox.getMinLon() || nw[0] > bbox.getMaxLon()
-                    || nw[1] < bbox.getMinLat() || se[1] > bbox.getMaxLat()) {
-                continue;
-            }
             Point a = mv.getPoint(new LatLon(nw[1], nw[0]));
             Point b = mv.getPoint(new LatLon(se[1], se[0]));
             int px = Math.min(a.x, b.x);
             int py = Math.min(a.y, b.y);
             int w = Math.max(1, Math.abs(b.x - a.x));
             int h = Math.max(1, Math.abs(b.y - a.y));
+            // Cull in SCREEN space, after projecting, rather than with a lon/lat
+            // test against the view bounds: a view straddling the antimeridian has
+            // minLon > maxLon, and a plain range test drops every cell in it.
+            // There are at most a few thousand cells, so projecting first is cheap.
+            if (!screen.intersects(px, py, w, h)) {
+                continue;
+            }
             g.setColor(fill);
             g.fillRect(px, py, w, h);
             g.setColor(edge);
