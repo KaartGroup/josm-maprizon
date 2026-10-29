@@ -278,6 +278,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * (panoramic) instead of a wedge. Set via {@link #highlightFrame}. */
     private Double coneBearingDeg;
     private boolean cone360;
+    /** True once any frame has been shown from this layer — the gate for
+     * {@link #getChangesetSourceTag}. Deliberately not reset by "Clear downloaded
+     * coverage": edits made from a photo already seen still came from it. EDT only. */
+    private boolean imageViewed;
 
     // --- rendering constants (Phase 1 styling: coverage was hairline-thin +
     // tiny dots, invisible except at max zoom; these make it legible). ---
@@ -910,6 +914,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         lastNearestPoint = frame.getPoints().get(0);
         coneBearingDeg = bearingDeg;
         cone360 = is360;
+        imageViewed = true;
         invalidate();
     }
 
@@ -2312,6 +2317,20 @@ public class MaprizonLayer extends Layer implements MouseListener {
         JPanel panel = new JPanel(new BorderLayout());
         panel.add(new JLabel(sb.toString()), BorderLayout.CENTER);
         return panel;
+    }
+
+    /**
+     * "Maprizon" for the changeset {@code source} tag, once a photo has actually been
+     * opened from this layer. JOSM's upload dialog collects this from visible layers
+     * only, and only when the mapper clicks "obtain from current layers" or has
+     * auto-obtain on ({@code MapView.getLayerInformationForSourceTag}) — so this
+     * never writes a tag on its own. Coverage lines alone are not a source: until a
+     * photo is viewed, nothing was mapped from Maprizon, and claiming otherwise would
+     * inflate the attribution (Mapillary likewise tags only after images were viewed).
+     */
+    @Override
+    public String getChangesetSourceTag() {
+        return imageViewed ? "Maprizon" : null;
     }
 
     @Override

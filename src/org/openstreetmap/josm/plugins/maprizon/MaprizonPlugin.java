@@ -6,6 +6,7 @@ import org.openstreetmap.josm.actions.JosmAction;
 import org.openstreetmap.josm.gui.MainApplication;
 import org.openstreetmap.josm.gui.MainMenu;
 import org.openstreetmap.josm.gui.MapFrame;
+import org.openstreetmap.josm.io.remotecontrol.RequestProcessor;
 import org.openstreetmap.josm.plugins.Plugin;
 import org.openstreetmap.josm.plugins.PluginInformation;
 import org.openstreetmap.josm.plugins.maprizon.actions.DownloadMaprizonCoverageAction;
@@ -15,6 +16,7 @@ import org.openstreetmap.josm.plugins.maprizon.actions.ShowMaprizonHelpAction;
 import org.openstreetmap.josm.plugins.maprizon.actions.ToggleMaprizonLayerAction;
 import org.openstreetmap.josm.plugins.maprizon.gui.MaprizonImageDialog;
 import org.openstreetmap.josm.plugins.maprizon.io.PluginUpdateCheck;
+import org.openstreetmap.josm.plugins.maprizon.remotecontrol.OpenMaprizonImageHandler;
 import org.openstreetmap.josm.tools.Logging;
 
 import javax.swing.Action;
@@ -61,6 +63,9 @@ public class MaprizonPlugin extends Plugin {
         maprizonMenu.add(buildMenuItem(new ShowMaprizonDiagnosticsAction()));
         maprizonMenu.add(buildMenuItem(new ShowMaprizonHelpAction()));
         menu.addMenu(maprizonMenu, "Maprizon", KeyEvent.VK_M, menu.getMenuCount(), null);
+
+        // /maprizon on JOSM's remote control: the web viewer's "Edit here in JOSM".
+        RequestProcessor.addRequestHandlerClass(OpenMaprizonImageHandler.COMMAND, OpenMaprizonImageHandler.class);
 
         MaprizonLog.info("plugin loaded, version " + MaprizonVersion.current()
                 + " — log file: " + MaprizonLog.file());
