@@ -1373,11 +1373,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         .map(en -> en.getKey() + "{ok=" + en.getValue()[0] + ",failed=" + en.getValue()[1] + "}")
                         .collect(java.util.stream.Collectors.joining(" ")));
                 SwingUtilities.invokeLater(() -> {
-                    if (failedScope != null) {
-                        showOrgScopeUnavailable(failedScope, failedReason);
-                    } else if (failedTiles > 0 && userInitiated) {
-                        showPartialFetchFailure(failedTiles, failedReason);
-                    }
+                    // MERGE FIRST, report after. The failure reports below include a
+                    // modal dialog, and it used to run before this merge in the same
+                    // runnable, so everything that DID load sat undrawn until the
+                    // user dismissed a box about the part that didn't. Seen live
+                    // (2026-10-29): every download blocked like that, two dialogs
+                    // stacked, nothing on the map behind them.
+                    //
                     // Merge dedups (a line spans many tiles); report what was ADDED
                     // per facing, so a download states exactly what it contributed.
                     Map<String, Integer> addedByFacing = merge(fetched);
@@ -1407,6 +1409,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         new Notification("<html><b>Maprizon download</b> (z" + reqZoom + ", " + buildTag() + ")<br>"
                                 + perFacing + "</html>")
                                 .setDuration(Notification.TIME_LONG).show();
+                    }
+                    if (failedScope != null) {
+                        showOrgScopeUnavailable(failedScope, failedReason);
+                    } else if (failedTiles > 0 && userInitiated) {
+                        showPartialFetchFailure(failedTiles, failedReason);
                     }
                     if (userInitiated && added == 0) {
                         showNothingAdded(plannedTiles, allKnownEmpty);
@@ -2086,6 +2093,24 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * {@code maprizon.log} either way.
      */
     private void showPartialFetchFailure(int failedTiles, String reason) {
+        // One at a time. A modal dialog keeps the EDT pumping, so a download that
+        // finished while this was up opened a second one on top of it.
+        if (partialFailureDialogOpen) {
+            MaprizonLog.warn(failedTiles + " more tile(s) failed while the failure dialog was open: " + reason);
+            return;
+        }
+        partialFailureDialogOpen = true;
+        try {
+            showPartialFetchFailureDialog(failedTiles, reason);
+        } finally {
+            partialFailureDialogOpen = false;
+        }
+    }
+
+    /** EDT only — guards {@link #showPartialFetchFailure} against stacking. */
+    private boolean partialFailureDialogOpen;
+
+    private void showPartialFetchFailureDialog(int failedTiles, String reason) {
         JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
                 failedTiles + " tile(s) failed to load, so this area's coverage is\n"
                         + "incomplete — the gaps are NOT necessarily uncovered ground.\n\n"
