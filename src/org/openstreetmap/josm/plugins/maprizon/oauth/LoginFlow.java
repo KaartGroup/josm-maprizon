@@ -179,11 +179,17 @@ public final class LoginFlow {
                     BufferedReader in = new BufferedReader(
                             new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                     requestLine = in.readLine(); // e.g. "GET /maprizon-callback?code=..&state=.. HTTP/1.1"
-                } catch (SocketTimeoutException silent) {
-                    continue; // a preconnect that never spoke; not the callback
+                } catch (IOException silentOrReset) {
+                    // A preconnect that never spoke, or one the browser dropped.
+                    // Only accept() failing (Cancel, deadline) ends the wait.
+                    continue;
                 }
                 if (!CALLBACK_PATH.equals(requestPath(requestLine))) {
-                    reply(socket, "404 Not Found", "");
+                    try {
+                        reply(socket, "404 Not Found", "");
+                    } catch (IOException gone) {
+                        // The browser already hung up on its favicon; nothing to do.
+                    }
                     continue;
                 }
                 return answerCallback(socket, parseQuery(requestLine));
