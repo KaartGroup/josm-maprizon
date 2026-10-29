@@ -50,7 +50,9 @@ public final class PmtilesDirectory {
 
     /** {@code internal_compression} / {@code tile_compression} value for gzip. */
     public static final byte COMPRESSION_GZIP = 2;
-    /** ...and for "no compression". */
+    /** ...and for "no compression". Nothing compares against it — callers test
+     * for gzip and read anything else raw — but it is the only other value that
+     * branch is correct for, so it stays beside its sibling as the spec's record. */
     public static final byte COMPRESSION_NONE = 1;
 
     private PmtilesDirectory() {
@@ -122,11 +124,6 @@ public final class PmtilesDirectory {
             this.runLength = runLength;
             this.offset = offset;
             this.length = length;
-        }
-
-        /** True when {@code id} falls in this entry's run. */
-        public boolean covers(long id) {
-            return runLength > 0 && id >= tileId && id < tileId + runLength;
         }
     }
 

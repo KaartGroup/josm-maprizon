@@ -24,12 +24,13 @@ import javax.swing.JMenuItem;
 import java.awt.event.KeyEvent;
 
 /**
- * Main entry point for the Maprizon JOSM plugin (Phase 1).
+ * Main entry point for the Maprizon JOSM plugin.
  *
- * Adds the Tools-menu actions that toggle / download the
+ * Builds a top-level "Maprizon" menu whose actions toggle / download the
  * {@link org.openstreetmap.josm.plugins.maprizon.layer.MaprizonLayer} coverage
- * layer, and registers the docked {@link MaprizonImageDialog} image viewer with
- * each map frame so clicking a coverage point shows the actual image in JOSM.
+ * layer, open the selected object in Maprizon, and show diagnostics and help;
+ * and registers the docked {@link MaprizonImageDialog} image viewer with each
+ * map frame so clicking a coverage point shows the actual image in JOSM.
  */
 public class MaprizonPlugin extends Plugin {
 
@@ -40,7 +41,7 @@ public class MaprizonPlugin extends Plugin {
         // truth from the jar manifest JOSM just parsed.
         MaprizonVersion.set(info == null ? null : info.version);
 
-        // Build the Tools-menu items EXPLICITLY. Adding the JosmAction to the menu
+        // Build the menu items EXPLICITLY. Adding the JosmAction to the menu
         // (raw JMenu.add or MainMenu.add) rendered the item with its label +
         // accelerator but never delivered clicks to actionPerformed (verified via
         // diagnostics: menu clicks logged nothing, only the global hotkey did). A
@@ -70,7 +71,7 @@ public class MaprizonPlugin extends Plugin {
         PluginUpdateCheck.runInBackground();
     }
 
-    /** A Tools-menu item wired directly to the action's actionPerformed, carrying
+    /** A Maprizon-menu item wired directly to the action's actionPerformed, carrying
      * the action's label, tooltip, icon, and shortcut accelerator. */
     private static JMenuItem buildMenuItem(JosmAction action) {
         JMenuItem item = new JMenuItem(String.valueOf(action.getValue(Action.NAME)));

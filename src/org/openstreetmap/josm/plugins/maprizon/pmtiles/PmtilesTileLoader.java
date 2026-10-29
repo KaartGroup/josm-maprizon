@@ -140,9 +140,15 @@ public final class PmtilesTileLoader implements AutoCloseable {
                 // eviction; they are rebuilt lazily against the new URLs.
                 evictArchivesForScope(scope);
             } else if (forceResign || signed == null || !scope.equals(signedScope)) {
-                // Nothing usable: don't serve another scope's or an expired batch.
+                // Nothing usable: never serve another scope's batch, and never
+                // re-serve a batch a forced re-sign (i.e. a 403) just condemned.
                 return null;
             }
+            // Otherwise a routine re-sign failed for the SAME scope, and the old
+            // batch is kept — it may still be inside the refresh buffer, or may
+            // already be past expiresAt. If it is truly expired the read costs
+            // one 403, whose PmtilesForbiddenException brings the caller back
+            // here with forceResign — and if that re-sign fails too, null.
         }
         return signed == null ? null : signed.urls.get(facing);
     }
@@ -251,11 +257,13 @@ public final class PmtilesTileLoader implements AutoCloseable {
 
     /**
      * Does this facing's archive hold a tile at {@code (z,x,y)} in ANY current
-     * scope? Local lookup in the decoded directory — NO network request.
+     * scope? Never fetches the TILE itself, but is not network-free: it may sign
+     * (org scope), {@code open()} an archive not yet cached (header + root
+     * directory) and fetch the leaf directory the tile id falls in. Blocking —
+     * call OFF the EDT.
      *
-     * <p>Exposed because it changes what callers can do: the fetch path no longer
-     * has to request a tile to find out whether it exists, which is what the
-     * ancestor walk and the empty-tile ledger were compensating for.
+     * <p>Not used by the plugin's own fetch path; kept for the testbed probes,
+     * which use it to check tile presence without decoding.
      */
     public boolean hasTile(String facing, int z, int x, int y) throws IOException {
         IOException last = null;
@@ -284,21 +292,11 @@ public final class PmtilesTileLoader implements AutoCloseable {
     }
 
     /**
-     * Fetches and decodes one tile for one facing. Returns an empty list (not
-     * null) if the tile has no data at this z/x/y (sparse coverage) or no
-     * "imagery" layer.
-     */
-    public List<ImageryFeature> loadTile(String scope, String facing, int z, int x, int y) throws IOException {
-        List<ImageryFeature> features = loadTileOrNull(scope, facing, z, x, y);
-        return features != null ? features : java.util.Collections.emptyList();
-    }
-
-    /**
-     * Like {@link #loadTile}, but returns {@code null} when the tile does NOT
-     * exist in the archive at this z/x/y — as opposed to an empty list for a
-     * tile that IS present but carries no "imagery" features. This lets callers
-     * distinguish "nothing baked here, try the parent tile" (overzoom) from
-     * "tile present, genuinely empty area".
+     * Fetches and decodes one tile for one facing. Returns {@code null} when the
+     * tile does NOT exist in the archive at this z/x/y — as opposed to an empty
+     * list for a tile that IS present but carries no "imagery" features. This
+     * lets callers distinguish "nothing baked here, try the parent tile"
+     * (overzoom) from "tile present, genuinely empty area".
      *
      * <p>Historical note, because a stale comment here sent people the wrong way:
      * this used to say the archives "advertise maxZoom=16 but only bake tiles down

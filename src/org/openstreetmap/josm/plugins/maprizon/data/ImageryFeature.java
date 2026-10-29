@@ -15,10 +15,11 @@ import java.util.Map;
 public final class ImageryFeature {
 
     /**
-     * Sentinel {@link #getSourceZoom()} for features that did NOT come from a
-     * coverage tile (e.g. the image-dialog frames decoded from a viewer API
-     * response). Treated as "always fine" so any such feature that were ever
-     * painted survives the detail-mode zoom filter in the layer.
+     * Sentinel zoom (both {@link #getRequestZoom()} and the decoded source zoom)
+     * for features that did NOT come from a coverage tile (e.g. the image-dialog
+     * frames decoded from a viewer API response). The layer's level-of-detail
+     * filter checks {@link #getRequestZoom()} for this value and never treats such
+     * a feature as superseded by finer tiles.
      */
     public static final int NATIVE_ZOOM = Integer.MAX_VALUE;
 
@@ -28,9 +29,11 @@ public final class ImageryFeature {
     private final String facing;
     /** Slippy zoom of the tile this feature was actually decoded from (the
      * overzoom-resolved ancestor level, e.g. 15 for native fine, 12/13 for a
-     * coarse overzoom). Drives the layer's level-of-detail paint filter so coarse
-     * geometry and its full-resolution replacement never render on top of each
-     * other. {@link #NATIVE_ZOOM} for non-tile features. */
+     * coarse overzoom). Informational only and currently never read: it does NOT
+     * drive level of detail — that is keyed on {@link #requestZoom}, because
+     * comparing decoded zooms hid shallow-baked facings. Carried through
+     * {@link #withRequestZoom(int)} so a copy loses nothing.
+     * {@link #NATIVE_ZOOM} for non-tile features. */
     private final int sourceZoom;
     /**
      * Slippy zoom this feature was REQUESTED at — which, unlike {@link #sourceZoom},
@@ -72,12 +75,6 @@ public final class ImageryFeature {
     /** The facing this feature was loaded from (i.e. which per-facing PMTiles file). */
     public String getFacing() {
         return facing;
-    }
-
-    /** Slippy zoom of the tile this feature was decoded from; {@link #NATIVE_ZOOM}
-     * for non-tile (API) features. See the field doc. */
-    public int getSourceZoom() {
-        return sourceZoom;
     }
 
     /** Slippy zoom this feature was requested at; {@link #NATIVE_ZOOM} for
@@ -132,10 +129,6 @@ public final class ImageryFeature {
 
     public String getDayId() {
         return prop("day_id");
-    }
-
-    public String getPriority() {
-        return prop("priority");
     }
 
     private String prop(String key) {

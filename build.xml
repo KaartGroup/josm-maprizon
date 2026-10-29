@@ -11,7 +11,7 @@
 
     <!-- Configure these properties (replace "..." accordingly).
          See https://josm.openstreetmap.de/wiki/DevelopersGuide/DevelopingPlugins
-         These duplicate plugin.properties (see build-common.xml note) - keep in sync by hand.
+         These duplicate plugin.properties (see the note at the top of that file) - keep in sync by hand.
     -->
     <property name="plugin.author" value="Kaart"/>
     <property name="plugin.class" value="org.openstreetmap.josm.plugins.maprizon.MaprizonPlugin"/>
@@ -52,7 +52,7 @@
     <target name="compile" depends="init">
         <echo message="compiling sources for ${plugin.jar} ..."/>
         <javac srcdir="src" debug="true" destdir="${plugin.build.dir}" includeantruntime="false"
-               encoding="UTF-8" source="17" target="17">
+               encoding="UTF-8" release="17">
             <classpath refid="classpath"/>
             <compilerarg value="-Xlint:deprecation"/>
             <compilerarg value="-Xlint:unchecked"/>

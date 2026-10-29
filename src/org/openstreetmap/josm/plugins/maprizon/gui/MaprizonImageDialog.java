@@ -25,7 +25,6 @@ import javax.swing.JSlider;
 import javax.swing.JToggleButton;
 import javax.swing.KeyStroke;
 import javax.swing.SwingConstants;
-import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.SwingUtilities;
 
@@ -534,6 +533,11 @@ public final class MaprizonImageDialog extends ToggleDialog {
                 // loadToken moving is how that is detected (same guard the image
                 // loader uses).
                 if (token != loadToken.get()) {
+                    // The superseding display may have run while crossingSequence
+                    // was still set and greyed the buttons out; nothing else will
+                    // turn them back on, so do it here now the crossing is over.
+                    prevButton.setEnabled(!frames.isEmpty());
+                    nextButton.setEnabled(!frames.isEmpty());
                     return;
                 }
                 if (seq == null || seq.isEmpty()) {
@@ -606,6 +610,10 @@ public final class MaprizonImageDialog extends ToggleDialog {
     }
 
     private void loadImage(String url, boolean is360) {
+        // Bumped before the early returns, not just on a cache miss: showing ANY
+        // newer frame must supersede a load still in flight, or a slow uncached
+        // frame lands on top of the cached one the user has since stepped to.
+        final long token = loadToken.incrementAndGet();
         if (url == null) {
             showLoaded(null, is360);
             return;
@@ -618,7 +626,6 @@ public final class MaprizonImageDialog extends ToggleDialog {
             showLoaded(cached, is360);
             return;
         }
-        final long token = loadToken.incrementAndGet();
         exec.submit(() -> {
             try {
                 // Resolve the raw (stored) URL to fetchable bytes: signed when logged
@@ -654,7 +661,7 @@ public final class MaprizonImageDialog extends ToggleDialog {
                     }
                 });
             } catch (Throwable t) {
-                Logging.warn("Maprizon: image load failed: " + t);
+                Logging.warn("Maprizon: image load failed: " + redact(String.valueOf(t)));
                 SwingUtilities.invokeLater(() -> status.setText("<html>Error loading image</html>"));
             }
         });
@@ -756,19 +763,30 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
     private static BufferedImage fetch(String url) {
         try {
+            // setLogAtDebug: HttpClient otherwise logs every request URL at INFO,
+            // and this one is presigned, signature in the query string.
             HttpClient.Response res = HttpClient.create(new URL(url))
+                    .setLogAtDebug(true)
                     .setConnectTimeout(10_000)
                     .setReadTimeout(30_000)
                     .connect();
             if (res.getResponseCode() != 200) {
-                Logging.warn("Maprizon: image fetch HTTP " + res.getResponseCode() + " for " + url);
+                Logging.warn("Maprizon: image fetch HTTP " + res.getResponseCode() + " for " + redact(url));
                 return null;
             }
             return ImageIO.read(res.getContent());
         } catch (IOException | RuntimeException e) {
-            Logging.warn("Maprizon: image fetch failed: " + e);
+            Logging.warn("Maprizon: image fetch failed: " + redact(String.valueOf(e)));
             return null;
         }
+    }
+
+    /** Strip query strings before logging: a signed image URL carries its signature
+     * there. Same output as {@code PmtilesArchive.redact} for a bare URL, but also
+     * applied to exception text, which can embed the URL mid-message (e.g. a
+     * MalformedURLException). */
+    private static String redact(String s) {
+        return s == null ? null : s.replaceAll("\\?\\S*", "?<signature-redacted>");
     }
 
     @Override

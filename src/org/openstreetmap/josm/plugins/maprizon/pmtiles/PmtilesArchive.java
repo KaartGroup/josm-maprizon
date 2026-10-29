@@ -224,10 +224,6 @@ public final class PmtilesArchive {
                 + " levels for tile id " + tileId);
     }
 
-    public boolean isOpen() {
-        return header != null;
-    }
-
     public PmtilesDirectory.Header header() {
         return header;
     }

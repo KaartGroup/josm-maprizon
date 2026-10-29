@@ -57,7 +57,7 @@ right-click menu.
 Click a coverage track to open its image in the **Maprizon Image** panel; a cone
 on the map marks the camera direction. The control bar under the image walks the
 sequence, switches cameras, and (behind the ☀ button) adjusts brightness and
-contrast. To see private imagery, right-click the layer → **Log in to Viewer**
+contrast. To see private imagery, right-click the layer → **Log in to Maprizon**
 (optional; anonymous access covers all public data).
 
 ## Troubleshooting

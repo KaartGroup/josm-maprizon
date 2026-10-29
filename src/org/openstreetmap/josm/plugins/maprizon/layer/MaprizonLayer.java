@@ -63,7 +63,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * JOSM map layer showing Maprizon street-level imagery sequence coverage,
- * colored by camera facing, fetched from the public per-facing PMTiles files.
+ * colored by camera facing, fetched from the per-facing PMTiles files.
  *
  * <p>Coverage is fetched the way JOSM's own OSM data is: <b>scoped to the
  * current view and downloaded on demand</b> (Layer menu / toolbar
@@ -72,10 +72,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * There is an opt-in "Auto-refresh on pan" mode for a live feel, but it is off
  * by default so the layer never silently dumps world-scale geometry.
  *
- * <p>Phase 1 scope: read-only coverage display + "View in Maprizon" deep link
- * for the nearest feature to the last map click. See the README for what is
- * explicitly NOT built yet (reverse sync, changeset attribution, private-org
- * coverage).
+ * <p>Logged out it reads the public bake; logged in with an organization it reads
+ * that org's private bake AND public together (a union, never a swap — see
+ * {@code PmtilesTileLoader.currentScopes()}). Read-only: a click shows the
+ * nearest image in the docked photo panel and "View in Maprizon" deep-links it.
+ * See the README for what is explicitly NOT built yet (reverse sync, changeset
+ * attribution).
  */
 public class MaprizonLayer extends Layer implements MouseListener {
 
@@ -97,18 +99,18 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     /**
      * Max levels to walk UP (to parent tiles) when the tile at the requested
-     * zoom doesn't exist in the archive — i.e. overzoom. The archives advertise
-     * maxZoom=16 in their header but bake NO z16 tiles, so a zoomed-in request for
-     * z16 always misses on the first step (wasting it). Worse, different facings
-     * are baked to different depths: `right` coverage begins at ~z15, but
+     * zoom doesn't exist in the archive — i.e. overzoom. The drive facings are
+     * baked to z16 (see {@link #DETAIL_MIN_ZOOM}), but not every facing reaches
+     * that deep everywhere, and different facings are baked to different depths
+     * for the same spot. When this budget was sized, `right` began at ~z15, but
      * `front`/`left`/`360` coverage for the same spot can begin only at ~z12.
      * With too small a budget the walk stops before reaching z12, so those facings
      * come back EMPTY while `right` renders — the "only right shows up" bug
      * (verified: budget 3 → front/left/360 = 0; budget 4 → all four populate).
      * So the budget must bridge z16→~z12 with margin. BOUNDED (not down to world
      * zoom) so a spot with genuinely no coverage can't collapse to a huge low-zoom
-     * tile — the scale rule — and clip-to-view keeps the coarse parent's geometry
-     * from spilling outside the downloaded area.
+     * tile — the scale rule — and clipping to the requested tile keeps the coarse
+     * parent's geometry from spilling outside the downloaded area.
      */
     private static final int MAX_OVERZOOM_STEPS = 6;
 
@@ -268,7 +270,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private Timer busyTicker;
     private int spinnerTick;
 
-    private LatLon lastClickLatLon;
     private ImageryFeature lastNearestFeature;
     private double[] lastNearestPoint;
     /** Camera bearing (deg, clockwise from north) orienting the selected frame's
@@ -405,9 +406,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private static final int POINT_MIN_ZOOM = 19;
 
     /** Login/logout changes the SET of tile scopes read (public alone vs the org's
-     * private bake + public), and the tile ledger is not scope-keyed, so both the
-     * accumulated coverage and the ledger are stale — drop them so the next
-     * download pulls every bake the new state can see. */
+     * private bake + public), so the tile ledger is stale either way. Login keeps
+     * the drawn coverage and drops only the ledgers; logout clears both, since the
+     * org's features can no longer be told apart. See {@link #onAuthChanged}. */
     private final Runnable authListener = () -> SwingUtilities.invokeLater(this::onAuthChanged);
 
     public MaprizonLayer() {
@@ -526,9 +527,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     @Override
     public void paint(Graphics2D g, MapView mv, Bounds bbox) {
-        // Current display zoom decides level-of-detail: below USABLE_ZOOM we are in
-        // "overview" (zoomed out); at/above it in "detail" (zoomed in enough to see
-        // individual image points).
+        // detailMode (raw zoom >= USABLE_ZOOM) only gates opt-in auto-refresh below.
+        // It decides nothing about drawing: arrows and the heavier weight start at
+        // DETAIL_MIN_ZOOM, image point markers at POINT_MIN_ZOOM.
         int rawZoom = rawScreenZoom(bbox, mv.getWidth());
         boolean detailMode = rawZoom >= USABLE_ZOOM;
         // One weight for the whole stack — see DETAIL_SCALE.
@@ -1042,6 +1043,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
         storedFeatureKeys.clear();
         featuresByFacing = new HashMap<>();
         refinedToZoom = -1;
+        // The selection points INTO the features just dropped: left set, paint()
+        // kept drawing its ring and cone over an empty map (and, after logout,
+        // over an org image the user can no longer see), and "View in Maprizon"
+        // still opened it. Lives here, not in clearLedgers(): login keeps the
+        // drawn coverage, so it keeps the selection too.
+        lastNearestFeature = null;
+        lastNearestPoint = null;
+        coneBearingDeg = null;
+        cone360 = false;
         invalidate();
     }
 
@@ -1126,10 +1136,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // collapsed the WHOLE view to a coarse zoom whenever the centre pixel
                 // sat in a small coverage gap, and since per-tile overzoom only walks
                 // UP (coarser), the fine geometry was then unreachable — the jagged
-                // tracks. Instead we request the fine zoom (header advertises 16; the
-                // finest tiles actually baked are z15) and let loadWithOverzoom fetch
-                // the native z15 tile per requested tile: full-resolution geometry,
-                // clipped losslessly by bbox, matching what the web viewer renders.
+                // tracks. Instead we request the fine zoom (up to z16, the finest
+                // bake — the drive facings carry their per-image points there; see
+                // DETAIL_MIN_ZOOM) and let loadWithOverzoom fall back per requested
+                // tile only where a facing is baked shallower: full-resolution
+                // geometry, clipped losslessly by bbox, matching the web viewer.
                 int zoom = screenZoom(view, widthPx);
                 if (refineOnly) {
                     // Record the ATTEMPT, not the success. Every early return below
@@ -1182,10 +1193,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     totalNewTiles += newTiles;
                 }
 
-                // Nothing renderable to fetch. Reachable when zoomed out with the
-                // 360 facing switched off in the layer menu: the overview gate
-                // leaves no facing, so without this the download would spin a
-                // spinner and finish having silently done nothing. Say why.
+                // Nothing renderable to fetch. Reachable only when every facing is
+                // switched off in the layer menu, so without this the download
+                // would spin a spinner and finish having silently done nothing.
+                // Say why.
                 if (rangesByFacing.isEmpty()) {
                     diag("plan EMPTY: no renderable facing at this zoom");
                     if (userInitiated) {
@@ -1220,8 +1231,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 // Resolved ONCE per download, not per tile: a login/logout landing
                 // mid-download would otherwise fetch part of the view under one set
                 // of scopes and the rest under another, while the tile ledger
-                // recorded all of it as done. (An auth change clears the layer
-                // anyway — this just makes the in-flight run internally consistent.)
+                // recorded all of it as done. (An auth change drops the ledgers
+                // anyway — login keeps the drawn coverage, logout clears it — this
+                // just makes the in-flight run internally consistent.)
                 final List<String> scopes = PmtilesTileLoader.currentScopes();
                 diag("scopes=" + scopes);
                 // Per-scope outcome, so a scope that produced NOTHING because it
@@ -1444,23 +1456,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return facing + '|' + f.getSequenceId() + '|' + pts.size() + '|' + h;
     }
 
-    /**
-     * Fetch one requested tile's features with BOUNDED overzoom: if the tile is
-     * absent at the requested zoom, walk up to parent tiles (z-1, z-2, …) until
-     * one exists, or the step budget / archive-min-zoom floor is reached. This is
-     * what makes zoomed-in views render — the archives declare maxZoom=16 but only
-     * bake to z15, so the requested z16 tile is absent and we fall back to z15.
-     *
-     * <p>Decodes each level's tile ONCE per download via {@code ancestorCache}
-     * (misses cached as null), clips each present level's features to the
-     * REQUESTED tile's own bounds, and keeps the level with the MOST in-tile
-     * features. "First present tile wins" is NOT safe: a facing can have a
-     * present-but-nearly-empty fine tile shadowing a dense coarser one (observed
-     * live: front z13 tile = 16 features while its z12 parent = 3188 — stopping
-     * at z13 rendered crumbs and made the facing look missing). Duplicates from
-     * a line spanning several requested tiles are collapsed later in
-     * {@link #merge}.
-     */
     /** Start-of-download trace marker. Goes to JOSM's debug log (off by default),
      * not a file in the user's home dir. */
     private static void diagReset(String header) {
@@ -1496,6 +1491,26 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 feats.size(), pts, minLon, maxLon, minLat, maxLat);
     }
 
+    /**
+     * Fetch one requested tile's features with BOUNDED overzoom: if the tile is
+     * absent at the requested zoom, walk up to parent tiles (z-1, z-2, …) within
+     * the step budget / archive-min-zoom floor. This is what makes zoomed-in
+     * views render wherever a facing is baked shallower than the requested zoom
+     * (the public {@code still} archive stops at z13, and even the drive facings,
+     * which reach z16, can be shallower for a given spot — see
+     * {@link #MAX_OVERZOOM_STEPS}).
+     *
+     * <p>Decodes each level's tile ONCE per download via {@code ancestorCache}
+     * (misses cached as null), collects EVERY present ancestor, and clips each
+     * level's features to the REQUESTED tile's own bounds. It then keeps the
+     * DEEPEST level whose clipped count is at least {@link #FINE_ENOUGH_FRACTION}
+     * of the best level's count. "First present tile wins" is NOT safe: a facing
+     * can have a present-but-nearly-empty fine tile shadowing a dense coarser one
+     * (observed live: front z13 = 16 features vs its z12 parent = 3188). Nor is
+     * "most features wins": it drags fine geometry down to a decimated coarse
+     * parent for a one-feature margin. Duplicates from a line spanning several
+     * requested tiles are collapsed later in {@link #merge}.
+     */
     private List<ImageryFeature> loadWithOverzoom(String scope, String facing, int zoom, int tx, int ty,
                                                   Map<String, List<ImageryFeature>> ancestorCache) throws IOException {
         int az = zoom;
@@ -2080,10 +2095,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 "Maprizon", JOptionPane.INFORMATION_MESSAGE);
     }
 
-    public boolean isAutoRefresh() {
-        return autoRefresh;
-    }
-
     public void setAutoRefresh(boolean on) {
         autoRefresh = on;
         if (on) {
@@ -2147,7 +2158,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
         if (!clickSelectsImagery(map)) {
             return;
         }
-        lastClickLatLon = map.mapView.getLatLon(e.getX(), e.getY());
         // Hit-test against WHERE THE RIBBONS ARE DRAWN, at the weight they are
         // drawn at — not against the raw trace. See findNearest.
         int rawZoom = rawScreenZoom(map.mapView.getRealBounds(), map.mapView.getWidth());
@@ -2462,13 +2472,6 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
     /**
-     * Builds the Maprizon deep link for a feature at (lat, lon). Only sequence_id
-     * and lat/lon are required; other fields are included when present on the
-     * feature. Per spec, "facing" is only ever emitted for front/left/right/360 -
-     * "still" is not an accepted value for that parameter, so it is omitted for
-     * still features (the rest of the link is unaffected).
-     */
-    /**
      * A viewer link carrying ONLY a location — no sequence, no facing.
      *
      * <p>Used by the "imagery for the selected OSM object" action, where there is
@@ -2490,6 +2493,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * here. */
     private static final String VIEWER_BASE = "https://app.maprizon.com/";
 
+    /**
+     * Builds the Maprizon deep link for a feature at (lat, lon). Only sequence_id
+     * and lat/lon are required; other fields are included when present on the
+     * feature. Per spec, "facing" is only ever emitted for front/left/right/360 -
+     * "still" is not an accepted value for that parameter, so it is omitted for
+     * still features (the rest of the link is unaffected).
+     */
     static String buildDeepLink(ImageryFeature feature, double lat, double lon) {
         StringBuilder qs = new StringBuilder(VIEWER_BASE + "?");
         boolean first = true;
