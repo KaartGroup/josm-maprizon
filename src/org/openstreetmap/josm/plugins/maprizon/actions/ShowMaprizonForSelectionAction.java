@@ -12,14 +12,12 @@ import org.openstreetmap.josm.gui.Notification;
 import org.openstreetmap.josm.plugins.maprizon.MaprizonLog;
 import org.openstreetmap.josm.plugins.maprizon.layer.MaprizonLayer;
 import org.openstreetmap.josm.tools.ImageProvider;
-import org.openstreetmap.josm.tools.Logging;
+import org.openstreetmap.josm.tools.OpenBrowser;
 import org.openstreetmap.josm.tools.Shortcut;
 
 import javax.swing.JOptionPane;
-import java.awt.Desktop;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
-import java.net.URI;
 import java.util.Collection;
 
 /**
@@ -83,12 +81,14 @@ public class ShowMaprizonForSelectionAction extends JosmAction {
         String url = MaprizonLayer.locationDeepLink(where.lat(), where.lon(), LINK_ZOOM);
         MaprizonLog.info("opening viewer for selected OSM object at "
                 + String.format(java.util.Locale.ROOT, "%.6f, %.6f", where.lat(), where.lon()));
-        try {
-            Desktop.getDesktop().browse(new URI(url));
-        } catch (Exception ex) {
-            Logging.error("Maprizon: failed to open browser for " + url, ex);
+        // OpenBrowser, not Desktop.browse: it goes through JOSM's platform hook
+        // first, which opens a browser on Linux desktops where Desktop.browse is
+        // unsupported. Returns null on success, else the reason it failed.
+        String error = OpenBrowser.displayUrl(url);
+        if (error != null) {
+            MaprizonLog.warn("failed to open browser for " + url + ": " + error);
             JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
-                    "Could not open browser: " + ex.getMessage(),
+                    "Could not open browser: " + error,
                     "Maprizon",
                     JOptionPane.ERROR_MESSAGE);
         }

@@ -22,6 +22,7 @@ import org.openstreetmap.josm.plugins.maprizon.pmtiles.PmtilesTileLoader;
 import org.openstreetmap.josm.plugins.maprizon.pmtiles.TileMath;
 import org.openstreetmap.josm.tools.ImageProvider;
 import org.openstreetmap.josm.tools.Logging;
+import org.openstreetmap.josm.tools.OpenBrowser;
 import org.openstreetmap.josm.tools.Utils;
 
 import javax.swing.AbstractAction;
@@ -37,7 +38,6 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Font;
 import java.awt.FontMetrics;
-import java.awt.Desktop;
 import java.awt.Graphics2D;
 import java.awt.Point;
 import java.awt.RenderingHints;
@@ -46,7 +46,6 @@ import java.awt.event.ActionEvent;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.io.IOException;
-import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -2472,12 +2471,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
             return;
         }
         String url = buildDeepLink(lastNearestFeature, lastNearestPoint[1], lastNearestPoint[0]);
-        try {
-            Desktop.getDesktop().browse(new URI(url));
-        } catch (Exception e) {
-            Logging.error("Maprizon: failed to open browser for deep link " + url, e);
+        // OpenBrowser rather than Desktop.browse — see ShowMaprizonForSelectionAction.
+        String error = OpenBrowser.displayUrl(url);
+        if (error != null) {
+            MaprizonLog.warn("failed to open browser for deep link " + url + ": " + error);
             JOptionPane.showMessageDialog(MainApplication.getMainFrame(),
-                    "Could not open browser: " + e.getMessage(),
+                    "Could not open browser: " + error,
                     "Error",
                     JOptionPane.ERROR_MESSAGE);
         }

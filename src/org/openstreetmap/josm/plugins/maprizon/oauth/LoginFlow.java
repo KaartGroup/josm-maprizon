@@ -3,7 +3,9 @@
 package org.openstreetmap.josm.plugins.maprizon.oauth;
 
 import org.openstreetmap.josm.gui.MainApplication;
+import org.openstreetmap.josm.plugins.maprizon.MaprizonLog;
 import org.openstreetmap.josm.tools.Logging;
+import org.openstreetmap.josm.tools.OpenBrowser;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -15,7 +17,6 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 
-import java.awt.Desktop;
 import java.awt.Dimension;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -26,7 +27,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
-import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
@@ -249,11 +249,12 @@ public final class LoginFlow {
         });
     }
 
+    /** Through JOSM's platform hook (see ShowMaprizonForSelectionAction): on a
+     * Linux desktop where Desktop.browse is unsupported, login could not start. */
     private static void openBrowser(String url) {
-        try {
-            Desktop.getDesktop().browse(new URI(url));
-        } catch (Exception e) {
-            Logging.warn("Maprizon: could not open browser for login: " + e);
+        String error = OpenBrowser.displayUrl(url);
+        if (error != null) {
+            MaprizonLog.warn("could not open browser for login: " + error);
         }
     }
 
