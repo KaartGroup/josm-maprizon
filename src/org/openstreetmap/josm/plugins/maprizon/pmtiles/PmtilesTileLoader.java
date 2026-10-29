@@ -376,6 +376,8 @@ public final class PmtilesTileLoader implements AutoCloseable {
                     union.add(id);
                 }
                 anyScope = true;
+            } catch (PmtilesAbsentException e) {
+                anyScope = true; // no archive: an answer (nothing here), not a failure
             } catch (IOException e) {
                 MaprizonLog.warn("availability: " + scope + "/" + facing + " unreadable: " + e.getMessage());
                 last = e;
