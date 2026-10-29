@@ -298,7 +298,7 @@ public final class ViewerApiClient {
                 JsonObject urlsObj = root.getJsonObject("urls");
                 if (urlsObj == null) {
                     lastSignFailure = "tiles/sign response had no \"urls\" object";
-                    Logging.warn("Maprizon: " + lastSignFailure);
+                    org.openstreetmap.josm.plugins.maprizon.MaprizonLog.warn(lastSignFailure);
                     return null;
                 }
                 Map<String, String> urls = new HashMap<>();
@@ -310,7 +310,7 @@ public final class ViewerApiClient {
                 }
                 if (urls.isEmpty()) {
                     lastSignFailure = "tiles/sign returned no usable URLs";
-                    Logging.warn("Maprizon: " + lastSignFailure);
+                    org.openstreetmap.josm.plugins.maprizon.MaprizonLog.warn(lastSignFailure);
                     return null;
                 }
                 // The server signs every facing it knows about (currently six,
@@ -325,7 +325,7 @@ public final class ViewerApiClient {
                 long expiresAt = expiresNum != null ? expiresNum.longValue() : 0L;
                 if (expiresAt <= 0L) {
                     lastSignFailure = "tiles/sign response had no usable expiresAt";
-                    Logging.warn("Maprizon: " + lastSignFailure);
+                    org.openstreetmap.josm.plugins.maprizon.MaprizonLog.warn(lastSignFailure);
                     return null;
                 }
                 lastSignFailure = null; // success
@@ -439,7 +439,7 @@ public final class ViewerApiClient {
                 return new SequenceResult(frames, clickedIndex);
             }
         } catch (IOException | RuntimeException e) {
-            Logging.warn("Maprizon: fetchPublicSequence failed: " + e);
+            Logging.warn("Maprizon: fetchSequence (" + endpoint + ") failed: " + e);
             return null;
         }
     }
