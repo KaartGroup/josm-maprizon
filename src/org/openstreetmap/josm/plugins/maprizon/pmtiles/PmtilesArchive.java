@@ -250,6 +250,56 @@ public final class PmtilesArchive {
     }
 
     /**
+     * Every tile id present in the archive that is below {@code limitId}, in
+     * ascending order — "which coarse tiles exist", for the availability overview.
+     *
+     * <p>Cheap because of how v3 ids are laid out: ids run zoom by zoom
+     * ({@link TileId#base}), so every tile at or above a coarse zoom sits at the very
+     * START of the index, and the walk stops at the first entry past the limit.
+     * Leaf directories are followed (a large org bake spills its index into them —
+     * the same trap {@link #find} documents) but only those whose range can hold an
+     * id below the limit, so a big archive costs a leaf or two, not its whole index.
+     *
+     * @param maxIds cap on the result, because the directory is untrusted network
+     *               input; reaching it truncates (and the caller logs it) rather
+     *               than failing
+     */
+    public long[] tileIdsBelow(long limitId, int maxIds) throws IOException {
+        long[] out = new long[Math.min(maxIds, 1 << 16)];
+        int[] n = {0};
+        out = collectBelow(root, limitId, maxIds, out, n, 0);
+        return Arrays.copyOf(out, n[0]);
+    }
+
+    private long[] collectBelow(Dir dir, long limitId, int maxIds, long[] out, int[] n, int depth)
+            throws IOException {
+        if (depth >= MAX_DIR_DEPTH) {
+            throw new IOException("PMTiles directory nested deeper than " + MAX_DIR_DEPTH + " levels");
+        }
+        for (int i = 0; i < dir.starts.length && dir.starts[i] < limitId; i++) {
+            long run = dir.runs[i];
+            if (run > 0) {
+                long end = Math.min(dir.starts[i] + run, limitId);
+                for (long id = dir.starts[i]; id < end; id++) {
+                    if (n[0] >= maxIds) {
+                        return out;
+                    }
+                    if (n[0] == out.length) {
+                        out = Arrays.copyOf(out, Math.min(maxIds, out.length * 2));
+                    }
+                    out[n[0]++] = id;
+                }
+            } else if (dir.lengths[i] > 0) {
+                // A leaf pointer covers [starts[i], starts[i+1]): it can only hold
+                // ids below the limit if it STARTS below it, which the loop bound
+                // already guarantees.
+                out = collectBelow(leafDir(dir.offsets[i], dir.lengths[i]), limitId, maxIds, out, n, depth + 1);
+            }
+        }
+        return out;
+    }
+
+    /**
      * Does this archive hold a tile at {@code (z,x,y)}?
      *
      * <p>Answers from the cached index without fetching the TILE, but it may fetch

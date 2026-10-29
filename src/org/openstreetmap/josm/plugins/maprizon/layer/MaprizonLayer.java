@@ -19,6 +19,7 @@ import org.openstreetmap.josm.plugins.maprizon.gui.MaprizonImageDialog;
 import org.openstreetmap.josm.plugins.maprizon.oauth.LoginFlow;
 import org.openstreetmap.josm.plugins.maprizon.oauth.ViewerAuth;
 import org.openstreetmap.josm.plugins.maprizon.pmtiles.PmtilesTileLoader;
+import org.openstreetmap.josm.plugins.maprizon.pmtiles.TileId;
 import org.openstreetmap.josm.plugins.maprizon.pmtiles.TileMath;
 import org.openstreetmap.josm.tools.ImageProvider;
 import org.openstreetmap.josm.tools.Logging;
@@ -161,6 +162,27 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * EDT by the Hide/Show menu actions. Iteration order is not relied on
      * (ordered iteration always uses FacingStyle.ALL_FACINGS + contains). */
     private final Set<String> enabledFacings = ConcurrentHashMap.newKeySet();
+
+    /** Where imagery exists, from archive directories alone — drawn as cells under
+     * everything so a new user can see where to download before downloading.
+     * Null until the first fetch lands (or when it found nothing readable).
+     * Replaced whole on the EDT; see {@link #refreshAvailability}. */
+    private volatile CoverageIndex availability;
+    /** Bumped per refresh, so a fetch started under the old audience can never
+     * overwrite one started after a login/logout. */
+    private final java.util.concurrent.atomic.AtomicLong availabilityGeneration =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** EDT only (menu toggle + paint). */
+    private boolean showAvailability = true;
+    /** Overview cells are drawn this many zooms FINER than the screen, so each
+     * is 256 / 2^3 = 32 px across: legible as a grid, small enough to aim at. */
+    private static final int AVAILABILITY_CELL_ZOOM_OFFSET = 3;
+    /** Above this screen zoom a cell is 512 px or more — more wash than signal,
+     * and the coverage lines themselves are the answer there. */
+    private static final int AVAILABILITY_MAX_SCREEN_ZOOM = 13;
+    /** Cap on tile ids read per facing and scope for the overview; the directory
+     * is untrusted input. Public archives hold ~70 ids at z<=12. */
+    private static final int AVAILABILITY_MAX_TILES = 200_000;
 
     /** Archive zoom range, cached so screenZoom() never blocks on a reader-header
      * HTTP read (it is called from paint() on the EDT in auto-refresh mode).
@@ -416,6 +438,39 @@ public class MaprizonLayer extends Layer implements MouseListener {
         super(audienceLayerName());
         enabledFacings.addAll(FacingStyle.ALL_FACINGS);
         ViewerAuth.getInstance().addLoginStateListener(authListener);
+        refreshAvailability();
+    }
+
+    /**
+     * Re-read which coarse tiles exist, for the current scopes, and swap the
+     * overview in when done. Directories only (header + root, plus at most the
+     * leaves that start below z13) — a few KB per facing, never a tile decode —
+     * on the loader thread, like every other network read here.
+     *
+     * <p>Not part of the download ledger and not cleared by "Clear downloaded
+     * coverage": it describes the archives, not what this session has fetched.
+     */
+    private void refreshAvailability() {
+        long generation = availabilityGeneration.incrementAndGet();
+        loadExecutor.submit(() -> {
+            Map<String, long[]> byFacing = new HashMap<>();
+            for (String facing : FacingStyle.ALL_FACINGS) {
+                try {
+                    byFacing.put(facing, loader.availableTileIds(facing, CoverageIndex.MAX_ZOOM,
+                            AVAILABILITY_MAX_TILES));
+                } catch (IOException e) {
+                    MaprizonLog.warn("availability: no " + facing + " overview: " + e.getMessage());
+                }
+            }
+            CoverageIndex index = new CoverageIndex(byFacing);
+            MaprizonLog.info("availability: " + index.summary());
+            SwingUtilities.invokeLater(() -> {
+                if (generation == availabilityGeneration.get()) {
+                    availability = index.isEmpty() ? null : index;
+                    invalidate();
+                }
+            });
+        });
     }
 
     /**
@@ -492,6 +547,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
             }
         }
         setName(audienceLayerName());
+        // The overview belongs to the old audience too. Drop it at once — after a
+        // logout the org's cells must not outlive the credential, exactly as its
+        // features don't — and re-read it for the new one.
+        availability = null;
+        refreshAvailability();
         redownloadCurrentViewQuietly();
         // Tell the user AT LOGIN if the login bought them nothing, instead of
         // letting them discover it as "no coverage anywhere" a few downloads later.
@@ -571,6 +631,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
         }
 
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        // 0. availability cells, beneath everything: where imagery exists, whether
+        // or not it has been downloaded.
+        if (showAvailability) {
+            paintAvailability(g, mv, bbox, rawZoom);
+        }
 
         // STRICT Z-ORDER, one pass per layer of the stack, over a projection made
         // ONCE per feature.
@@ -739,6 +805,52 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * See {@link #DETAIL_SCALE}. */
     private static float detailScale(int rawZoom) {
         return rawZoom >= DETAIL_MIN_ZOOM ? DETAIL_SCALE : 1f;
+    }
+
+    /**
+     * Draw the availability overview: a translucent cell wherever an enabled
+     * facing has imagery, at a cell size tied to the screen
+     * ({@link #AVAILABILITY_CELL_ZOOM_OFFSET}) so the grid reads the same at every
+     * zoom, the same screen-matched rule downloads use. Hidden facings drop out of
+     * it, as they do from the lines. Nothing past
+     * {@link #AVAILABILITY_MAX_SCREEN_ZOOM}.
+     */
+    private void paintAvailability(Graphics2D g, MapView mv, Bounds bbox, int rawZoom) {
+        CoverageIndex index = availability;
+        if (index == null || rawZoom > AVAILABILITY_MAX_SCREEN_ZOOM) {
+            return;
+        }
+        int cz = Math.max(0, Math.min(CoverageIndex.MAX_ZOOM, rawZoom + AVAILABILITY_CELL_ZOOM_OFFSET));
+        Set<Long> cells = index.cellsAt(cz, enabledFacings);
+        if (cells.isEmpty()) {
+            return;
+        }
+        Color c = FacingStyle.AVAILABILITY;
+        Color fill = new Color(c.getRed(), c.getGreen(), c.getBlue(), 70);
+        Color edge = new Color(c.getRed(), c.getGreen(), c.getBlue(), 200);
+        g.setStroke(new BasicStroke(1f));
+        for (long packed : cells) {
+            long x = CoverageIndex.unpackX(packed);
+            long y = CoverageIndex.unpackY(packed);
+            double[] nw = TileId.tileNorthWestLonLat(cz, x, y);
+            double[] se = TileId.tileNorthWestLonLat(cz, x + 1, y + 1);
+            // Cull off-screen cells before projecting: a zoomed-out world view can
+            // hold every cell, but only the visible ones cost anything.
+            if (se[0] < bbox.getMinLon() || nw[0] > bbox.getMaxLon()
+                    || nw[1] < bbox.getMinLat() || se[1] > bbox.getMaxLat()) {
+                continue;
+            }
+            Point a = mv.getPoint(new LatLon(nw[1], nw[0]));
+            Point b = mv.getPoint(new LatLon(se[1], se[0]));
+            int px = Math.min(a.x, b.x);
+            int py = Math.min(a.y, b.y);
+            int w = Math.max(1, Math.abs(b.x - a.x));
+            int h = Math.max(1, Math.abs(b.y - a.y));
+            g.setColor(fill);
+            g.fillRect(px, py, w, h);
+            g.setColor(edge);
+            g.drawRect(px, py, w, h);
+        }
     }
 
     /**
@@ -2020,6 +2132,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
             b.append("No Maprizon imagery exists in this view.\n\n")
              .append("This is not an error: the archives simply have no coverage here.\n")
              .append("Clearing downloaded coverage will not change this.\n\n");
+            if (availability != null && showAvailability) {
+                b.append("Zoom out: the cyan cells show where imagery exists.\n\n");
+            }
             if (isLoggedInWithoutOrg()) {
                 // Logged in, but the token carries no org — so the tile source
                 // silently fell back to the PUBLIC bake and the user is seeing
@@ -2330,6 +2445,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     .append(enabledFacings.contains(facing) ? "" : " (hidden)").append("<br>");
         }
         sb.append(autoRefresh ? "auto-refresh: on" : "auto-refresh: off").append("<br>");
+        CoverageIndex index = availability;
+        sb.append("availability: ").append(index == null ? "none loaded" : index.summary())
+          .append(showAvailability ? "" : " (hidden)").append("<br>");
         sb.append("<br>zoom thresholds: heavier lines + direction arrows from z")
           .append(DETAIL_MIN_ZOOM).append(", image markers from z").append(POINT_MIN_ZOOM)
           .append("<br>(JOSM shows the current zoom in its status bar)<br>");
@@ -2386,7 +2504,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      *   <li>Auto-refresh toggle — instantly reversible.</li>
      *   <li>Clear downloaded coverage — destructive (throws away accumulated
      *       downloads), so deliberately NOT adjacent to the pointer.</li>
-     *   <li>Facing show/hide, then View in Maprizon.</li>
+     *   <li>Availability show/hide and facing show/hide, then View in Maprizon.</li>
      *   <li>Log in/out — session-changing, so as far from the pointer as
      *       possible.</li>
      *   <li>JOSM's own show/hide + delete layer, which convention keeps last.</li>
@@ -2418,6 +2536,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
             }
         });
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
+        actions.add(new AbstractAction((showAvailability ? "Hide" : "Show")
+                + " imagery availability (cyan cells)") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showAvailability = !showAvailability;
+                invalidate();
+            }
+        });
         for (String facing : FacingStyle.ALL_FACINGS) {
             boolean enabled = enabledFacings.contains(facing);
             String label = (enabled ? "Hide " : "Show ") + facing + " facing";

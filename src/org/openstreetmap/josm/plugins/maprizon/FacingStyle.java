@@ -51,7 +51,13 @@ public final class FacingStyle {
         COLORS.put(STILL, new Color(0xFB, 0xC0, 0x2D));
     }
 
-    private static final String TILES_ENDPOINT = "https://viewer-tiles.sfo3.digitaloceanspaces.com/tiles";
+    /** The "imagery available here" overview cells. One colour for every facing on
+     * purpose — the overview answers "is there imagery here at all", and five tints
+     * stacked in one cell would read as noise. Cyan, because it is none of the five
+     * facing colours. */
+    public static final Color AVAILABILITY = new Color(0x00, 0xB4, 0xD8);
+
+    private static final String TILES_ENDPOINT ="https://viewer-tiles.sfo3.digitaloceanspaces.com/tiles";
 
     /** Scope prefix for anonymous visitors — the public bake. Authenticated users
      * read their org's bake ({@code <org_id>-<facing>.pmtiles}) instead, which is

@@ -7,6 +7,9 @@ JOSM, and browse the actual photos without leaving the editor.
 
 - **Coverage layer**, colour-coded by camera facing, downloaded on demand for
   your current view (downloads accumulate as you pan/zoom around).
+- **Imagery availability** — cyan cells show where Maprizon imagery exists
+  (public, plus your organization's when logged in) before you download
+  anything, so you know where to zoom in.
 - **Direction-of-travel arrows** along every coverage line, so you can tell
   which way a drive went before selecting it.
 - **In-editor image viewer** — click a track to open its photo in a side panel
