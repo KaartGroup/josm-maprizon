@@ -14,8 +14,8 @@ works with no account; an optional Auth0 login adds the user's organization's
 private imagery. Repo is **public**: `github.com/KaartGroup/josm-maprizon`,
 default branch `main`. License GPL-2.0-or-later.
 
-Current version: **1.0.28** (`build.xml` / `plugin.properties`, the `Release 1.0.28`
-commit, 2026-10-29). 1.0.23–1.0.25 were local builds that never shipped.
+Current version: **1.0.30** (`build.xml` / `plugin.properties`, the `Release 1.0.30`
+commit, 2026-10-30). 1.0.23–1.0.25 were local builds that never shipped.
 
 ## Build, run, test from a clean machine
 
@@ -27,8 +27,9 @@ ant clean dist      # -> Maprizon.jar at the repo root (gitignored)
 ant install         # copies it into the local JOSM plugins dir
 ```
 
-Verified 2026-10-29 (JDK 21, `release="17"`): builds clean, manifest says
-`Plugin-Version: 1.0.28`, `Plugin-Mainversion: 19481`, classes are Java 17 bytecode.
+Verified 2026-10-30 (JDK 21, `release="17"`, compile jar JOSM r19613 — the build
+refuses anything older than `plugin.main.version`): builds clean, manifest says
+`Plugin-Version: 1.0.30`, `Plugin-Mainversion: 19481`, classes are Java 17 bytecode.
 
 Restart JOSM after every install (it reads plugin jars only at startup). There
 are **no unit tests and no CI** — verification is throwaway probes in `testbed/`
@@ -60,7 +61,11 @@ Release steps:
    The in-plugin update check (`io/PluginUpdateCheck`) calls
    `POST /backend/api/upload/check_uploader_version` with
    `product: "josm-maprizon"` and only nags when the server's number is newer.
-   Live 2026-10-13 the server answers `status: ok` for 1.0.26.
+   Measured 2026-10-30: the server still held **1.0.26**, so no JOSM user had been
+   told about 1.0.27–1.0.29. The server's check is an exact match
+   (`server/flaskr/views/Upload.py`: `user_version != uploader_version`), so it
+   also tells any NEWER build it is "out of date"; the plugin ignores that
+   (`compare(running, latest) >= 0`), the desktop uploader does not.
 
 ### The official JOSM plugin list
 
