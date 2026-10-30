@@ -206,6 +206,39 @@ public final class PmtilesTileLoader implements AutoCloseable {
         archivesByFacing.remove(FacingStyle.PUBLIC_SCOPE + "/" + facing);
     }
 
+    /**
+     * Failures that would fail the same way on the next tile: a scope that could
+     * not be signed (keyed by scope) and an org facing that was never baked (404,
+     * keyed scope/facing).
+     *
+     * <p>Without this the download loop, which asks every scope for every tile,
+     * re-called the signer (and logged a warning) or re-read a missing header once
+     * per tile. Short-lived, and dropped by {@link #forgetFailures()} on a login
+     * change, so a fixed login or a fresh bake shows up promptly.
+     */
+    private final Map<String, RecentFailure> recentFailures = new ConcurrentHashMap<>();
+
+    private record RecentFailure(long atMs, String message) {
+    }
+
+    private static final long FAILURE_RECHECK_MS = 60L * 1000L;
+
+    private void rememberFailure(String key, IOException e) {
+        recentFailures.put(key, new RecentFailure(System.currentTimeMillis(), e.getMessage()));
+    }
+
+    private void rethrowRecentFailure(String key) throws IOException {
+        RecentFailure f = recentFailures.get(key);
+        if (f != null && System.currentTimeMillis() - f.atMs() < FAILURE_RECHECK_MS) {
+            throw new IOException(f.message());
+        }
+    }
+
+    /** Login state changed: what failed under the old credential may work now. */
+    public void forgetFailures() {
+        recentFailures.clear();
+    }
+
     /** The public archive for a facing does not exist (yet). Not a failure: callers
      * treat it as "no tiles here". See {@link #absentPublicFacings}. */
     public static final class PmtilesAbsentException extends IOException {
@@ -226,6 +259,8 @@ public final class PmtilesTileLoader implements AutoCloseable {
         if (knownAbsent(scope, facing)) {
             throw new PmtilesAbsentException(facing);
         }
+        rethrowRecentFailure(scope);
+        rethrowRecentFailure(key);
         if (!forceResign) {
             PmtilesArchive existing = archivesByFacing.get(key);
             if (existing != null) {
@@ -241,14 +276,27 @@ public final class PmtilesTileLoader implements AutoCloseable {
             }
             String urlStr = archiveUrlFor(facing, scope, forceResign);
             if (urlStr == null) {
-                // Be explicit, and pass on the SERVER's reason. "No signed URL"
-                // alone was true but useless: an expired login, an org missing
-                // from the token, and a 500 in the signer all read identically,
-                // and they need completely different fixes.
+                if (!forceResign && signed != null && scope.equals(signedScope)) {
+                    // Signed fine; the batch just has no URL for this facing. (A
+                    // forced re-sign that failed also leaves the old batch in
+                    // place, so it is excluded: that is a signing failure.)
+                    IOException e = new IOException("no signed URL for " + key
+                            + " (the signer did not return this facing)");
+                    rememberFailure(key, e);
+                    throw e;
+                }
+                // Signing itself failed. Be explicit, and pass on the SERVER's
+                // reason. "No signed URL" alone was true but useless: an expired
+                // login, an org missing from the token, and a 500 in the signer
+                // all read identically, and they need completely different fixes.
+                // Names the scope, not the facing: it is remembered per scope and
+                // re-thrown for every facing.
                 String why = ViewerApiClient.lastSignFailure();
-                throw new IOException("no signed URL for " + scope + "/" + facing
+                IOException e = new IOException("no signed URL for " + scope
                         + (why == null ? " (private tiles need a valid login; see Maprizon > Log in)"
                                        : " — " + why));
+                rememberFailure(scope, e);
+                throw e;
             }
             // Re-check AFTER signing: archiveUrlFor may have evicted this key.
             PmtilesArchive existing = archivesByFacing.get(key);
@@ -266,6 +314,9 @@ public final class PmtilesTileLoader implements AutoCloseable {
                     markAbsent(facing);
                     throw new PmtilesAbsentException(facing);
                 }
+                throw e;
+            } catch (PmtilesArchive.PmtilesNotFoundException e) {
+                rememberFailure(key, e);
                 throw e;
             }
             archivesByFacing.put(key, archive);

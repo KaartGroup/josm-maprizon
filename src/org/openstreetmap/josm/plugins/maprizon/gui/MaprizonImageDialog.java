@@ -46,6 +46,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBuffer;
 import java.awt.image.RescaleOp;
 import java.io.IOException;
 import java.io.InputStream;
@@ -80,17 +81,19 @@ public final class MaprizonImageDialog extends ToggleDialog {
     /** Small LRU of decoded frames so walking back and forth is instant. */
     private static final int CACHE_MAX = 40;
 
+    /** ...bounded by decoded size as well as count. Flat frames are cached at full
+     * resolution (the panel zooms to 8x, so they cannot be shrunk like panoramas),
+     * and a 3840x2160 frame is ~25-33 MB decoded: 40 of them was about 1 GB. */
+    private static final long CACHE_MAX_BYTES = 256L * 1024 * 1024;
+
     /** Max width a cached panorama is decoded to — memory-vs-detail knob (source
      * equirectangular 360 frames can be very large; 40 uncapped ones would blow the
      * heap). Panoramas wider than this are downscaled on load. */
     private static final int MAX_PANO_WIDTH = 4096;
 
-    private final Map<String, BufferedImage> cache = new LinkedHashMap<String, BufferedImage>(64, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<String, BufferedImage> eldest) {
-            return size() > CACHE_MAX;
-        }
-    };
+    /** Access-ordered, so the eldest entry is the least recently shown. Guarded
+     * by itself; written only through {@link #cachePut}. */
+    private final Map<String, BufferedImage> cache = new LinkedHashMap<>(64, 0.75f, true);
 
     private final ImagePanel imagePanel = new ImagePanel();
     private final PanoramaPanel panoPanel = new PanoramaPanel();
@@ -670,9 +673,7 @@ public final class MaprizonImageDialog extends ToggleDialog {
                     img = capPano(img); // bound cache memory for big equirectangular frames
                 }
                 if (img != null) {
-                    synchronized (cache) {
-                        cache.put(url, img);
-                    }
+                    cachePut(url, img);
                 }
                 final BufferedImage fimg = img;
                 final boolean loggedIn = ViewerAuth.getInstance().isLoggedIn();
@@ -698,6 +699,29 @@ public final class MaprizonImageDialog extends ToggleDialog {
                 SwingUtilities.invokeLater(() -> status.setText("<html>Error loading image</html>"));
             }
         });
+    }
+
+    /** Add a frame, then evict least-recently-shown frames until both caps hold.
+     * The newest frame always stays, however large. */
+    private void cachePut(String url, BufferedImage img) {
+        synchronized (cache) {
+            cache.put(url, img);
+            long bytes = 0;
+            for (BufferedImage b : cache.values()) {
+                bytes += decodedBytes(b);
+            }
+            java.util.Iterator<Map.Entry<String, BufferedImage>> it = cache.entrySet().iterator();
+            while (cache.size() > 1 && (cache.size() > CACHE_MAX || bytes > CACHE_MAX_BYTES)) {
+                Map.Entry<String, BufferedImage> eldest = it.next();
+                bytes -= decodedBytes(eldest.getValue());
+                it.remove();
+            }
+        }
+    }
+
+    private static long decodedBytes(BufferedImage img) {
+        DataBuffer db = img.getRaster().getDataBuffer();
+        return (long) db.getSize() * db.getNumBanks() * DataBuffer.getDataTypeSize(db.getDataType()) / 8;
     }
 
     /** Route a decoded frame to the right viewer: the panorama panel for a real
@@ -739,10 +763,22 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
     /** Downscale a panorama wider than {@link #MAX_PANO_WIDTH} (aspect-preserving)
      * so the frame cache can't exhaust the heap. Uses {@link #halveDownTo} rather
-     * than one big {@code drawImage} for the reason given there. */
+     * than one big {@code drawImage} for the reason given there.
+     *
+     * <p>Always returns {@code TYPE_INT_RGB}, converting here on the loader thread
+     * if need be: {@link PanoramaPanel#setPanorama} reads that type's pixel array
+     * directly, and otherwise copied the whole panorama (~32 MB at 4096 wide) on
+     * the EDT on every display, cache hits included. */
     private static BufferedImage capPano(BufferedImage src) {
         if (src.getWidth() <= MAX_PANO_WIDTH) {
-            return src;
+            if (src.getType() == BufferedImage.TYPE_INT_RGB) {
+                return src;
+            }
+            BufferedImage rgb = new BufferedImage(src.getWidth(), src.getHeight(), BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = rgb.createGraphics();
+            g.drawImage(src, 0, 0, null);
+            g.dispose();
+            return rgb;
         }
         int w = MAX_PANO_WIDTH;
         int h = (int) Math.round((double) src.getHeight() * MAX_PANO_WIDTH / src.getWidth());
@@ -869,6 +905,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
      * of dropping back to fit on every step. */
     private static final class ImagePanel extends JPanel {
         private transient BufferedImage image;
+        /** Panel-sized scratch buffer for brightness/contrast, reused while the
+         * panel size is unchanged instead of allocated on every paint. */
+        private transient BufferedImage adjustBuf;
 
         /** Multiplier over the fit-to-panel scale; 1.0 = fitted (the floor). */
         private double zoom = 1.0;
@@ -1071,7 +1110,11 @@ public final class MaprizonImageDialog extends ToggleDialog {
                 // Filter a PANEL-SIZED buffer, never the source: at 8x zoom the drawn
                 // image is many times the panel, and only what is on screen needs
                 // adjusting. Keeps the cost flat however far in the user has zoomed.
-                BufferedImage buf = new BufferedImage(getWidth(), getHeight(), BufferedImage.TYPE_INT_RGB);
+                if (adjustBuf == null || adjustBuf.getWidth() != getWidth()
+                        || adjustBuf.getHeight() != getHeight()) {
+                    adjustBuf = new BufferedImage(getWidth(), getHeight(), BufferedImage.TYPE_INT_RGB);
+                }
+                BufferedImage buf = adjustBuf;
                 Graphics2D bg = buf.createGraphics();
                 bg.setColor(getBackground());
                 bg.fillRect(0, 0, getWidth(), getHeight());

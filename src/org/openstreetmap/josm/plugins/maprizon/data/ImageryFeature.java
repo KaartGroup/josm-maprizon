@@ -45,6 +45,12 @@ public final class ImageryFeature {
      * {@link #NATIVE_ZOOM} for non-tile features.
      */
     private final int requestZoom;
+    /** Bounding box of {@link #points}, computed once: download clipping and paint
+     * culling both test it for every feature, many times over. */
+    private final double minLon;
+    private final double minLat;
+    private final double maxLon;
+    private final double maxLat;
 
     public ImageryFeature(List<double[]> points, Map<String, Object> properties, String facing) {
         this(points, properties, facing, NATIVE_ZOOM);
@@ -66,6 +72,26 @@ public final class ImageryFeature {
         // lowercase; this guards the API-parsed path.
         this.facing = facing == null ? null : facing.toLowerCase(Locale.ROOT);
         this.sourceZoom = sourceZoom;
+        double x0 = Double.MAX_VALUE;
+        double y0 = Double.MAX_VALUE;
+        double x1 = -Double.MAX_VALUE;
+        double y1 = -Double.MAX_VALUE;
+        for (double[] p : points) {
+            x0 = Math.min(x0, p[0]);
+            y0 = Math.min(y0, p[1]);
+            x1 = Math.max(x1, p[0]);
+            y1 = Math.max(y1, p[1]);
+        }
+        this.minLon = x0;
+        this.minLat = y0;
+        this.maxLon = x1;
+        this.maxLat = y1;
+    }
+
+    /** Does this feature's bounding box touch the given box? False for a feature
+     * with no points. */
+    public boolean intersects(double west, double south, double east, double north) {
+        return maxLon >= west && minLon <= east && maxLat >= south && minLat <= north;
     }
 
     public List<double[]> getPoints() {

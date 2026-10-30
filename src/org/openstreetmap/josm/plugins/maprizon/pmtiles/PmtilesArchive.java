@@ -306,6 +306,9 @@ public final class PmtilesArchive {
             if (code == HttpURLConnection.HTTP_FORBIDDEN) {
                 throw new PmtilesForbiddenException("403 for " + redact(url));
             }
+            if (code == HttpURLConnection.HTTP_NOT_FOUND) {
+                throw new PmtilesNotFoundException("404 for " + redact(url));
+            }
             if (code != HttpURLConnection.HTTP_PARTIAL && code != HttpURLConnection.HTTP_OK) {
                 throw new IOException("HTTP " + code + " for " + redact(url));
             }
@@ -347,6 +350,16 @@ public final class PmtilesArchive {
         private static final long serialVersionUID = 1L;
 
         PmtilesForbiddenException(String msg) {
+            super(msg);
+        }
+    }
+
+    /** Thrown for a 404: the object does not exist. Reached through a signed org
+     * URL for a facing that was never baked. */
+    public static final class PmtilesNotFoundException extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        PmtilesNotFoundException(String msg) {
             super(msg);
         }
     }
