@@ -64,8 +64,9 @@ running plugin reports comes from the manifest via `MaprizonVersion`, so there i
 third copy to forget. Then publish the jar (Spaces zip for the web app's download
 link, GitHub release for the plugin list) and raise `JOSM_MAPRIZON_VERSION` on the
 api — the full ritual, and which channel serves what today, is in `HANDOFF.md`.
-`PluginsSource-edited.txt` is a local draft of the JOSM wiki plugin list with this
-jar's entry added; it has **not** been submitted, so the plugin is not listed.
+The plugin IS in JOSM's plugin list: a "by Kaart" entry on the `PluginsSource`
+wiki page points at the GitHub `latest` release, so whatever release is latest is
+what every JOSM user can install and update to.
 
 ## Work intake (Trello)
 

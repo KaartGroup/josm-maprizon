@@ -29,12 +29,17 @@ JOSM, and browse the actual photos without leaving the editor.
 
 ## Install
 
-The plugin is not yet in JOSM's built-in plugin list. Download it from the
-Maprizon web app (the JOSM plugin download link), unzip it, and drop `Maprizon.jar` into your JOSM plugins
+In JOSM: **Preferences → Plugins**, search for **Maprizon**, tick it, and click
+**OK**. Updates come the same way (**Update plugins** on that tab).
+
+Or install by hand: download it from the Maprizon web app (the JOSM plugin
+download link), unzip it, and drop `Maprizon.jar` into your JOSM plugins
 directory (`~/Library/JOSM/plugins` on macOS, `~/.josm/plugins` on Linux,
-`%APPDATA%\JOSM\plugins` on Windows) and restart JOSM. JOSM only reads plugin
-jars at startup, so a restart is required after every update — the download
-notification prints the running version so you can confirm which jar is live.
+`%APPDATA%\JOSM\plugins` on Windows).
+
+Either way, restart JOSM: it only reads plugin jars at startup, so a restart is
+required after every update — the download notification prints the running
+version so you can confirm which jar is live.
 
 ## Usage
 
