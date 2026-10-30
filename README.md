@@ -22,6 +22,10 @@ JOSM, and browse the actual photos without leaving the editor.
 - **View cone** on the map showing the selected image's camera direction.
 - **Optional login** to view your organization's private imagery; everything
   public works with no account.
+- **Changeset source** — once you have viewed a Maprizon photo, JOSM's upload
+  dialog offers `Maprizon` as a source ("obtain from current layers").
+- **Open from the web** — JOSM's remote control gains a `/maprizon` command, so a
+  link can open JOSM at a specific Maprizon image.
 
 ## Requirements
 
@@ -64,6 +68,11 @@ on the map marks the camera direction. The control bar under the image walks the
 sequence, switches cameras, and (behind the ☀ button) adjusts brightness and
 contrast. To see private imagery, right-click the layer → **Log in to Maprizon**
 (optional; anonymous access covers all public data).
+
+With remote control enabled (Preferences → Remote Control),
+`http://127.0.0.1:8111/maprizon?lat=&lon=&sequence_id=&sequence_index=&facing=&trip_id=&upload_batch_id=`
+zooms JOSM to the spot, downloads coverage and opens that image — the same
+parameters as a Maprizon share link. `lat`/`lon` alone just zooms and downloads.
 
 ## Troubleshooting
 
