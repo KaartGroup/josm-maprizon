@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon;
 
+import org.openstreetmap.josm.spi.preferences.Config;
+
 import java.awt.Color;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -12,14 +14,20 @@ import java.util.Map;
  * Per-facing constants: the list of supported camera facings, the public PMTiles
  * URL for each, and a distinct display color for each.
  *
- * Per-facing display colors, matched EXACTLY to the Viewer web app's map layer
- * (client/src/.../MapComponents.js FACING_CONFIG + sequenceLayerStyles.js) so
- * coverage reads the same in JOSM as in the viewer:
- *   front -> white   #FFFFFF
- *   left  -> red     #FF0000
- *   right -> green   #00FF00
- *   360   -> purple  #9900FF
- *   still -> amber   #FBC02D   (viewer has no still map layer; kept distinct here)
+ * Per-facing display colors, copied from the web app's single source of truth,
+ * {@code client/src/theme/colorPalettes.js} (viewer-2-0, checked 2026-10-30), so
+ * coverage reads the same in JOSM as in the app. Two palettes, as in the app:
+ * <pre>
+ *            standard          colourblind (Okabe–Ito)
+ *   front    #FFFFFF white     #FFFFFF white
+ *   left     #FF0000 red       #E69F00 orange
+ *   right    #00FF00 green     #0072B2 blue
+ *   360      #9900FF purple    #CC79A7 reddish purple
+ *   still    #FF8C00 orange    #F0E442 yellow     (the app's stillMarker)
+ * </pre>
+ * This is a COPY, so it can drift: {@code still} had drifted to #FBC02D before
+ * it was re-synced. Check colorPalettes.js when the app's palette changes.
+ * Outlines stay black/white in both: an outline encodes shape, not category.
  * White front is only visible against a black outline (see MaprizonLayer paint),
  * mirroring the viewer's black outline circle under each point.
  */
@@ -42,14 +50,25 @@ public final class FacingStyle {
      */
     public static final List<String> DEEP_LINK_FACINGS = Arrays.asList(FRONT, LEFT, RIGHT, FACING_360);
 
-    private static final Map<String, Color> COLORS = new LinkedHashMap<>();
+    private static final Map<String, Color> STANDARD = new LinkedHashMap<>();
+    private static final Map<String, Color> COLORBLIND = new LinkedHashMap<>();
     static {
-        COLORS.put(FRONT, new Color(0xFF, 0xFF, 0xFF));
-        COLORS.put(LEFT, new Color(0xFF, 0x00, 0x00));
-        COLORS.put(RIGHT, new Color(0x00, 0xFF, 0x00));
-        COLORS.put(FACING_360, new Color(0x99, 0x00, 0xFF));
-        COLORS.put(STILL, new Color(0xFB, 0xC0, 0x2D));
+        STANDARD.put(FRONT, new Color(0xFF, 0xFF, 0xFF));
+        STANDARD.put(LEFT, new Color(0xFF, 0x00, 0x00));
+        STANDARD.put(RIGHT, new Color(0x00, 0xFF, 0x00));
+        STANDARD.put(FACING_360, new Color(0x99, 0x00, 0xFF));
+        STANDARD.put(STILL, new Color(0xFF, 0x8C, 0x00));
+
+        COLORBLIND.put(FRONT, new Color(0xFF, 0xFF, 0xFF));
+        COLORBLIND.put(LEFT, new Color(0xE6, 0x9F, 0x00));
+        COLORBLIND.put(RIGHT, new Color(0x00, 0x72, 0xB2));
+        COLORBLIND.put(FACING_360, new Color(0xCC, 0x79, 0xA7));
+        COLORBLIND.put(STILL, new Color(0xF0, 0xE4, 0x42));
     }
+
+    /** JOSM preference holding the palette choice. A display setting, so it is
+     * kept across sessions, as the app keeps its colourblind theme. */
+    private static final String PREF_COLORBLIND = "maprizon.colorblind";
 
     private static final String TILES_ENDPOINT = "https://viewer-tiles.sfo3.digitaloceanspaces.com/tiles";
 
@@ -70,8 +89,22 @@ public final class FacingStyle {
     }
 
     public static Color colorFor(String facing) {
-        Color c = COLORS.get(facing);
+        Color c = (isColorBlind() ? COLORBLIND : STANDARD).get(facing);
         return c != null ? c : Color.GRAY;
+    }
+
+    /** True when the colourblind-safe palette is selected. */
+    public static boolean isColorBlind() {
+        try {
+            return Config.getPref().getBoolean(PREF_COLORBLIND, false);
+        } catch (RuntimeException e) {
+            return false; // preferences not initialised (probes, early startup)
+        }
+    }
+
+    /** Select the palette; callers repaint. */
+    public static void setColorBlind(boolean on) {
+        Config.getPref().putBoolean(PREF_COLORBLIND, on);
     }
 
     /** Public bake URL (anonymous). */
