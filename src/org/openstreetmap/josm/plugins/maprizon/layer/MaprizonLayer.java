@@ -60,6 +60,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * JOSM map layer showing Maprizon street-level imagery sequence coverage,
@@ -227,6 +228,20 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     private final AtomicBoolean loading = new AtomicBoolean(false);
 
+    /**
+     * Bumped by {@link #clearLedgers()}. A download captures it at submit and
+     * drops its results if it changed: the loader thread outlives a logout or a
+     * Clear, and without this it went on writing the ledgers and then merged what
+     * it had fetched, so org imagery from the old token came back after logout and
+     * tiles probed without the org scope were never re-probed after login.
+     */
+    private final AtomicInteger generation = new AtomicInteger();
+
+    /** A quiet re-download (after login/logout) asked for while another download
+     * was running. The running one re-queues it when it ends, instead of the
+     * request being dropped by {@code loading.compareAndSet}. */
+    private final AtomicBoolean redownloadWanted = new AtomicBoolean(false);
+
     /** Opt-in live behavior: re-download around the view as it changes. Off by default. */
     private volatile boolean autoRefresh = false;
     /**
@@ -263,8 +278,13 @@ public class MaprizonLayer extends Layer implements MouseListener {
     private Timer autoDebounceTimer;
     private Bounds pendingAutoBounds;
     private int pendingAutoWidth;
-    /** True when the pending debounced load is a zoom refresh (sharpen only). */
-    private boolean pendingRefineOnly;
+    /** The pending debounced load wants a live-mode download that may widen
+     * coverage, and/or a zoom refresh (sharpen only). Both can be wanted at once
+     * and are OR'd while the timer runs: one slot used to hold one kind, and a
+     * single paint schedules the pan download and then the refresh, so the refresh
+     * replaced the pan and the new ground never loaded. */
+    private boolean pendingWiden;
+    private boolean pendingRefine;
 
     // Loading-spinner animation. All EDT.
     private Timer busyTicker;
@@ -523,6 +543,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
             map.mapView.removeMouseListener(this);
         }
         ViewerAuth.getInstance().removeLoginStateListener(authListener);
+        MaprizonImageDialog dialog = MaprizonImageDialog.getInstance();
+        if (dialog != null) {
+            dialog.layerRemoved(this);
+        }
         if (autoDebounceTimer != null) {
             autoDebounceTimer.stop();
         }
@@ -1076,6 +1100,9 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * baked since, which is what makes "Clear downloaded coverage" honest).
      */
     private void clearLedgers() {
+        // Bump BEFORE clearing: a loader that adds a key and then sees the old
+        // generation is guaranteed this clear has not run yet and will remove it.
+        generation.incrementAndGet();
         loadedTileKeys.clear();
         emptyTileKeys.clear();
         lastAutoBounds = null;
@@ -1102,7 +1129,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
             return;
         }
         MapView mv = map.mapView;
-        submitDownload(mv.getRealBounds(), mv.getWidth(), true, false);
+        // Flag first, then try: the running download reads the flag only after
+        // clearing `loading`, so either our submit gets in or it re-queues us.
+        redownloadWanted.set(true);
+        if (submitDownload(mv.getRealBounds(), mv.getWidth(), true, false, false)) {
+            redownloadWanted.set(false);
+        }
     }
 
     /**
@@ -1126,13 +1158,15 @@ public class MaprizonLayer extends Layer implements MouseListener {
      *                   the explicit-download model: it re-serves ground the user
      *                   asked for, at the resolution they are now looking at, and
      *                   never pulls in an area they did not ask for.
+     * @return false if another download was already running and this one was not started
      */
-    private void submitDownload(Bounds bbox, int widthPx, boolean enforceBudget, boolean userInitiated,
-                                boolean refineOnly) {
+    private boolean submitDownload(Bounds bbox, int widthPx, boolean enforceBudget, boolean userInitiated,
+                                   boolean refineOnly) {
         if (!loading.compareAndSet(false, true)) {
-            return;
+            return false;
         }
         final Bounds view = new Bounds(bbox);
+        final int gen = generation.get();
         // Kick one repaint so the loading spinner appears immediately: an explicit
         // download over a static view produces no map movement to trigger paint(),
         // so without this the spinner (and its self-sustaining animation ticker)
@@ -1158,7 +1192,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     // (nothing renderable, over budget) would otherwise leave the
                     // trigger armed, and paint() would re-schedule this on every
                     // repaint for as long as the view stayed put.
-                    if (zoom > refinedToZoom) {
+                    if (zoom > refinedToZoom && generation.get() == gen) {
                         refinedToZoom = zoom;
                     }
                 }
@@ -1262,6 +1296,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
                     List<ImageryFeature> acc = new ArrayList<>();
                     for (int tx = r[0]; tx <= r[1]; tx++) {
                         for (int ty = r[2]; ty <= r[3]; ty++) {
+                            if (generation.get() != gen) {
+                                // Logout, login or Clear since this started: what
+                                // it fetches now belongs to the old scope set.
+                                diag("superseded by an auth change or clear, abandoning");
+                                return;
+                            }
                             String key = tileKey(facing, zoom, tx, ty);
                             if (loadedTileKeys.contains(key) || emptyTileKeys.contains(key)) {
                                 continue;
@@ -1323,10 +1363,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
                             // ground in a partially-covered area stops costing a
                             // full ancestor walk on every download. Reaching this
                             // line at all means every scope's fetch SUCCEEDED.
-                            if (tileFeats.isEmpty()) {
-                                emptyTileKeys.add(key);
-                            } else {
-                                loadedTileKeys.add(key);
+                            Set<String> ledger = tileFeats.isEmpty() ? emptyTileKeys : loadedTileKeys;
+                            ledger.add(key);
+                            if (generation.get() != gen) {
+                                // A clear landed between the check above and this
+                                // add; take the entry back out (see clearLedgers).
+                                ledger.remove(key);
                             }
                         }
                     }
@@ -1372,6 +1414,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
                         .map(en -> en.getKey() + "{ok=" + en.getValue()[0] + ",failed=" + en.getValue()[1] + "}")
                         .collect(java.util.stream.Collectors.joining(" ")));
                 SwingUtilities.invokeLater(() -> {
+                    // On the EDT, so no clear can interleave with this check.
+                    if (generation.get() != gen) {
+                        diag("superseded by an auth change or clear before merge, dropping results");
+                        return;
+                    }
                     // MERGE FIRST, report after. The failure reports below include a
                     // modal dialog, and it used to run before this merge in the same
                     // runnable, so everything that DID load sat undrawn until the
@@ -1422,8 +1469,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 Logging.warn("Maprizon: coverage download failed: " + ex);
             } finally {
                 loading.set(false);
+                if (redownloadWanted.getAndSet(false)) {
+                    SwingUtilities.invokeLater(this::redownloadCurrentViewQuietly);
+                }
             }
         });
+        return true;
     }
 
     /**
@@ -1812,9 +1863,19 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
     private void scheduleAutoDownload(Bounds bbox, int widthPx, boolean refineOnly) {
+        if (autoDebounceTimer == null || !autoDebounceTimer.isRunning()) {
+            // Nothing pending (never scheduled, already fired, or stopped by a
+            // clear): start from a clean slate.
+            pendingWiden = false;
+            pendingRefine = false;
+        }
         pendingAutoBounds = new Bounds(bbox);
         pendingAutoWidth = widthPx;
-        pendingRefineOnly = refineOnly;
+        if (refineOnly) {
+            pendingRefine = true;
+        } else {
+            pendingWiden = true;
+        }
         if (autoDebounceTimer == null) {
             autoDebounceTimer = new Timer(AUTO_DEBOUNCE_MS, e -> fireAutoDownload());
             autoDebounceTimer.setRepeats(false);
@@ -1824,24 +1885,26 @@ public class MaprizonLayer extends Layer implements MouseListener {
 
     private void fireAutoDownload() {
         Bounds b = pendingAutoBounds;
+        boolean widen = pendingWiden;
+        boolean refine = pendingRefine;
+        pendingWiden = false;
+        pendingRefine = false;
         if (b == null || loading.get()) {
             return;
         }
-        if (pendingRefineOnly) {
+        // Widening wins when allowed: it fetches every tile in view at the screen
+        // zoom, which sharpens the ground already held as well. Re-check its gate
+        // at fire time: if the pan ended zoomed out of detail range, don't
+        // auto-load coarse data.
+        if (widen && autoRefresh && rawScreenZoom(b, pendingAutoWidth) >= USABLE_ZOOM) {
+            submitDownload(b, pendingAutoWidth, false, false);
+            return;
+        }
+        if (refine) {
             // Zoom refresh: allowed at any zoom (it only sharpens ground already
             // downloaded, so it cannot mass-load) and independent of live mode.
             submitDownload(b, pendingAutoWidth, true, false, true);
-            return;
         }
-        if (!autoRefresh) {
-            return;
-        }
-        // Re-check the gate at fire time: if the pan ended zoomed out of detail
-        // range, don't auto-load coarse data.
-        if (rawScreenZoom(b, pendingAutoWidth) < USABLE_ZOOM) {
-            return;
-        }
-        submitDownload(b, pendingAutoWidth, false, false);
     }
 
     /** Start/stop the repaint ticker that animates the loading spinner. EDT. */

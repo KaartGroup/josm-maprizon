@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.gui;
 
+import org.openstreetmap.josm.gui.MainApplication;
 import org.openstreetmap.josm.gui.dialogs.ToggleDialog;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
@@ -121,7 +122,10 @@ public final class MaprizonImageDialog extends ToggleDialog {
     private List<ImageryFeature> frames = Collections.emptyList();
     private int index;
     /** Layer that originated the current selection, so we can move its on-map
-     * marker to the frame being shown as the user walks the sequence. */
+     * marker to the frame being shown as the user walks the sequence. Dropped by
+     * {@link #layerRemoved} and re-resolved by {@link #markerLayer()}: toggling the
+     * layer off and on with the panel open left this on the destroyed layer, so
+     * walking moved a marker nobody could see and kept the old data in memory. */
     private MaprizonLayer originatingLayer;
 
     /** Clears the image cache + reloads the current frame when login state flips,
@@ -302,12 +306,20 @@ public final class MaprizonImageDialog extends ToggleDialog {
             syncFacingButtons(current.getFacing());
             return;
         }
-        final MaprizonLayer layer = originatingLayer;
+        final MaprizonLayer layer = markerLayer();
+        // Not incremented: the swap only starts a load once it has an answer. But
+        // anything that does start one meanwhile (a map click, Prev/Next) is newer
+        // than this swap, and a slow answer must not replace it.
+        final long token = loadToken.get();
         status.setText("Switching camera…");
         exec.submit(() -> {
-            ImageryFeature match = ViewerApiClient.nearestFeature(current, targetFacing);
-            final String failure = ViewerApiClient.lastSwapFailure();
+            ViewerApiClient.SwapResult swap = ViewerApiClient.nearestFeature(current, targetFacing);
+            final ImageryFeature match = swap.feature;
+            final String failure = swap.failure;
             SwingUtilities.invokeLater(() -> {
+                if (token != loadToken.get()) {
+                    return;
+                }
                 if (match != null) {
                     List<double[]> pts = match.getPoints();
                     showForClickedFeature(match, pts.isEmpty() ? null : pts.get(0), layer);
@@ -332,6 +344,25 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
     public static MaprizonImageDialog getInstance() {
         return instance;
+    }
+
+    /** Called from {@link MaprizonLayer#destroy()}: let go of a layer that is gone. EDT. */
+    public void layerRemoved(MaprizonLayer layer) {
+        if (originatingLayer == layer) {
+            originatingLayer = null;
+        }
+    }
+
+    /** The layer to draw the selection marker on: the one the selection came from,
+     * or, once that has been removed, whichever Maprizon layer is open now. EDT. */
+    private MaprizonLayer markerLayer() {
+        if (originatingLayer == null) {
+            List<MaprizonLayer> open = MainApplication.getLayerManager().getLayersOfType(MaprizonLayer.class);
+            if (!open.isEmpty()) {
+                originatingLayer = open.get(0);
+            }
+        }
+        return originatingLayer;
     }
 
     /** On login/logout: drop cached bytes and re-fetch the shown frame (now with
@@ -586,8 +617,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
         boolean is360 = FacingStyle.FACING_360.equals(f.getFacing());
         // Move the on-map selection marker to the frame now being shown, and orient
         // its view cone by the frame's heading (ring for 360).
-        if (originatingLayer != null) {
-            originatingLayer.highlightFrame(f, coneBearing(frames, index), is360);
+        MaprizonLayer layer = markerLayer();
+        if (layer != null) {
+            layer.highlightFrame(f, coneBearing(frames, index), is360);
         }
         // ONE compact line now that this sits in the bar rather than above the image:
         // the facing is already shown by which button is lit, so it does not need
@@ -678,8 +710,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
             final double base = baseObj == null ? 0.0 : baseObj;
             panoPanel.setPanorama(img);
             panoPanel.setYawListener(yawDeg -> {
-                if (originatingLayer != null) {
-                    originatingLayer.setViewConeBearing(norm360(base + yawDeg));
+                MaprizonLayer layer = markerLayer();
+                if (layer != null) {
+                    layer.setViewConeBearing(norm360(base + yawDeg));
                 }
             });
             setHost(panoPanel);

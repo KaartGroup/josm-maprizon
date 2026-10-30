@@ -700,22 +700,23 @@ public final class ViewerApiClient {
      * separate upload with its own batch id, so filtering would find nothing. That
      * is the opposite of the same-facing traversal rule above.
      *
-     * <p>Returns null for "no frame of that facing here" (a normal 404 at the edge
-     * of a drive) and for every failure, so a caller simply stays put.
+     * <p>The result's feature is null for "no frame of that facing here" (a normal
+     * 404 at the edge of a drive) and for every failure, so a caller simply stays
+     * put; {@link SwapResult#failure} tells the two apart.
      *
      * <p>Blocking. Call OFF the EDT.
      */
-    public static ImageryFeature nearestFeature(ImageryFeature src, String targetFacing) {
+    public static SwapResult nearestFeature(ImageryFeature src, String targetFacing) {
         if (src == null || targetFacing == null || targetFacing.isEmpty()) {
-            return null;
+            return SwapResult.MISS;
         }
         List<double[]> pts = src.getPoints();
         if (pts == null || pts.isEmpty()) {
-            return null;
+            return SwapResult.MISS;
         }
         if (src.getTripId() == null || src.getTripId().isEmpty()) {
             Logging.warn("Maprizon: camera swap skipped — frame carries no trip_id");
-            return null;
+            return SwapResult.MISS;
         }
         double lon = pts.get(0)[0];
         double lat = pts.get(0)[1];
@@ -753,38 +754,44 @@ public final class ViewerApiClient {
             if (res.getResponseCode() != 200) {
                 // 404 is "no such facing here" and is expected; anything else is a
                 // fault. Both leave the user where they are, but only one of them
-                // should ever be reported as missing imagery — see lastSwapFailure.
-                lastSwapFailure = res.getResponseCode() == 404
-                        ? null
-                        : endpoint + " returned HTTP " + res.getResponseCode();
+                // should ever be reported as missing imagery — see SwapResult.
                 Logging.warn("Maprizon: " + endpoint + " returned HTTP " + res.getResponseCode());
                 discardBody(res);
-                return null;
+                return res.getResponseCode() == 404
+                        ? SwapResult.MISS
+                        : new SwapResult(null, endpoint + " returned HTTP " + res.getResponseCode());
             }
-            lastSwapFailure = null;
             String content = res.fetchContent();
             try (JsonReader reader = Json.createReader(
                     new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)))) {
                 JsonObject root = reader.readObject();
                 JsonObject feat = root.getJsonObject("feature");
-                return feat == null ? null : toFeature(feat, targetFacing);
+                return feat == null ? SwapResult.MISS : new SwapResult(toFeature(feat, targetFacing), null);
             }
         } catch (IOException | RuntimeException e) {
-            lastSwapFailure = String.valueOf(e);
             Logging.warn("Maprizon: nearestFeature failed: " + e);
-            return null;
+            return new SwapResult(null, String.valueOf(e));
         }
     }
 
-    /** Why the last camera swap returned nothing, or null when the answer was the
-     * honest "no frame of that facing here". Lets the dialog say "no left camera
-     * here" only when that is what happened, and "the request failed" otherwise —
-     * the same distinction the web client had to learn (a 429 spent a long time
-     * being reported as missing imagery). */
-    private static volatile String lastSwapFailure;
+    /** A camera swap's answer: the counterpart frame, or why there is none.
+     *
+     * <p>{@code failure} is null when the answer was the honest "no frame of that
+     * facing here". Lets the dialog say "no left camera here" only when that is what
+     * happened, and "the request failed" otherwise — the same distinction the web
+     * client had to learn (a 429 spent a long time being reported as missing
+     * imagery). Returned with the result rather than kept in a static: swaps run on
+     * a pool, and two at once read each other's reason. */
+    public static final class SwapResult {
+        static final SwapResult MISS = new SwapResult(null, null);
 
-    public static String lastSwapFailure() {
-        return lastSwapFailure;
+        public final ImageryFeature feature;
+        public final String failure;
+
+        SwapResult(ImageryFeature feature, String failure) {
+            this.feature = feature;
+            this.failure = failure;
+        }
     }
 
     private static void addIfPresent(JsonObjectBuilder b, String key, String value) {
