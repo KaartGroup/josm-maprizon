@@ -12,6 +12,7 @@ import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
+import org.openstreetmap.josm.plugins.maprizon.MaprizonLog;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
 import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient;
 import org.openstreetmap.josm.plugins.maprizon.io.ViewerApiClient.SignedTileUrls;
@@ -167,12 +168,99 @@ public final class PmtilesTileLoader implements AutoCloseable {
     }
 
     /**
+     * Public archives that answered 403: facing -> when we saw it (epoch ms).
+     *
+     * <p><b>A 403 on a public archive means "not there", not "forbidden".</b> The
+     * tile baker DELETES a scope's tileset when that scope has nothing published
+     * (tile-baker orchestrator: "AN EMPTY SCOPE MUST DELETE ITS TILESET"), and
+     * Spaces, like S3, answers an anonymous read of a missing key with 403
+     * AccessDenied rather than 404. Measured 2026-10-29:
+     * {@code public_imagery-still} and a made-up {@code public_imagery-doesnotexist-xyz}
+     * return the identical 403 body. The web map already reads it as "nothing
+     * baked". Treating it as a failure here made every download report a partial
+     * failure, and tried to "re-sign" a URL that carries no signature.
+     *
+     * <p>Org archives are different: their URLs ARE signed, so a 403 there really
+     * can be an expired signature and keeps its one re-sign. Public only.
+     */
+    private final Map<String, Long> absentPublicFacings = new ConcurrentHashMap<>();
+
+    /** How long a public 403 is believed before the archive is tried again, so a
+     * facing baked mid-session appears without a restart. */
+    private static final long ABSENT_RECHECK_MS = 10L * 60L * 1000L;
+
+    private boolean knownAbsent(String scope, String facing) {
+        if (!FacingStyle.PUBLIC_SCOPE.equals(scope)) {
+            return false;
+        }
+        Long seen = absentPublicFacings.get(facing);
+        return seen != null && System.currentTimeMillis() - seen < ABSENT_RECHECK_MS;
+    }
+
+    private void markAbsent(String facing) {
+        if (absentPublicFacings.put(facing, System.currentTimeMillis()) == null) {
+            MaprizonLog.info("public " + facing + " archive answered 403, which Spaces sends for a"
+                    + " missing object: treating " + facing + " as having no public imagery yet"
+                    + " (re-checked after " + (ABSENT_RECHECK_MS / 60000) + " min)");
+        }
+        archivesByFacing.remove(FacingStyle.PUBLIC_SCOPE + "/" + facing);
+    }
+
+    /**
+     * Failures that would fail the same way on the next tile: a scope that could
+     * not be signed (keyed by scope) and an org facing that was never baked (404,
+     * keyed scope/facing).
+     *
+     * <p>Without this the download loop, which asks every scope for every tile,
+     * re-called the signer (and logged a warning) or re-read a missing header once
+     * per tile. Short-lived, and dropped by {@link #forgetFailures()} on a login
+     * change, so a fixed login or a fresh bake shows up promptly.
+     */
+    private final Map<String, RecentFailure> recentFailures = new ConcurrentHashMap<>();
+
+    private record RecentFailure(long atMs, String message) {
+    }
+
+    private static final long FAILURE_RECHECK_MS = 60L * 1000L;
+
+    private void rememberFailure(String key, IOException e) {
+        recentFailures.put(key, new RecentFailure(System.currentTimeMillis(), e.getMessage()));
+    }
+
+    private void rethrowRecentFailure(String key) throws IOException {
+        RecentFailure f = recentFailures.get(key);
+        if (f != null && System.currentTimeMillis() - f.atMs() < FAILURE_RECHECK_MS) {
+            throw new IOException(f.message());
+        }
+    }
+
+    /** Login state changed: what failed under the old credential may work now. */
+    public void forgetFailures() {
+        recentFailures.clear();
+    }
+
+    /** The public archive for a facing does not exist (yet). Not a failure: callers
+     * treat it as "no tiles here". See {@link #absentPublicFacings}. */
+    public static final class PmtilesAbsentException extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        PmtilesAbsentException(String facing) {
+            super("no public " + facing + " archive (nothing published for it)");
+        }
+    }
+
+    /**
      * @param forceResign re-sign before building the reader even if the cached
      *                    batch still looks current — used after a 403, which is
      *                    how a revoked/rotated signature announces itself.
      */
     private PmtilesArchive archiveFor(String scope, String facing, boolean forceResign) throws IOException {
         String key = scope + "/" + facing;
+        if (knownAbsent(scope, facing)) {
+            throw new PmtilesAbsentException(facing);
+        }
+        rethrowRecentFailure(scope);
+        rethrowRecentFailure(key);
         if (!forceResign) {
             PmtilesArchive existing = archivesByFacing.get(key);
             if (existing != null) {
@@ -188,14 +276,27 @@ public final class PmtilesTileLoader implements AutoCloseable {
             }
             String urlStr = archiveUrlFor(facing, scope, forceResign);
             if (urlStr == null) {
-                // Be explicit, and pass on the SERVER's reason. "No signed URL"
-                // alone was true but useless: an expired login, an org missing
-                // from the token, and a 500 in the signer all read identically,
-                // and they need completely different fixes.
+                if (!forceResign && signed != null && scope.equals(signedScope)) {
+                    // Signed fine; the batch just has no URL for this facing. (A
+                    // forced re-sign that failed also leaves the old batch in
+                    // place, so it is excluded: that is a signing failure.)
+                    IOException e = new IOException("no signed URL for " + key
+                            + " (the signer did not return this facing)");
+                    rememberFailure(key, e);
+                    throw e;
+                }
+                // Signing itself failed. Be explicit, and pass on the SERVER's
+                // reason. "No signed URL" alone was true but useless: an expired
+                // login, an org missing from the token, and a 500 in the signer
+                // all read identically, and they need completely different fixes.
+                // Names the scope, not the facing: it is remembered per scope and
+                // re-thrown for every facing.
                 String why = ViewerApiClient.lastSignFailure();
-                throw new IOException("no signed URL for " + scope + "/" + facing
+                IOException e = new IOException("no signed URL for " + scope
                         + (why == null ? " (private tiles need a valid login; see Maprizon > Log in)"
                                        : " — " + why));
+                rememberFailure(scope, e);
+                throw e;
             }
             // Re-check AFTER signing: archiveUrlFor may have evicted this key.
             PmtilesArchive existing = archivesByFacing.get(key);
@@ -206,7 +307,18 @@ public final class PmtilesTileLoader implements AutoCloseable {
             // open() eagerly reads header + directory, so a bad/expired signature
             // throws HERE — before the put, so a failed archive never poisons the
             // cache.
-            archive.open();
+            try {
+                archive.open();
+            } catch (PmtilesArchive.PmtilesForbiddenException e) {
+                if (FacingStyle.PUBLIC_SCOPE.equals(scope)) {
+                    markAbsent(facing);
+                    throw new PmtilesAbsentException(facing);
+                }
+                throw e;
+            } catch (PmtilesArchive.PmtilesNotFoundException e) {
+                rememberFailure(key, e);
+                throw e;
+            }
             archivesByFacing.put(key, archive);
             return archive;
         }
@@ -272,6 +384,8 @@ public final class PmtilesTileLoader implements AutoCloseable {
                 if (openArchive(scope, facing).hasTile(z, x, y)) {
                     return true;
                 }
+            } catch (PmtilesAbsentException e) {
+                // No archive is an answer ("no"), not a failure.
             } catch (IOException e) {
                 last = e;
             }
@@ -287,6 +401,8 @@ public final class PmtilesTileLoader implements AutoCloseable {
         try {
             return archiveFor(scope, facing);
         } catch (PmtilesArchive.PmtilesForbiddenException e) {
+            // Only reachable for org scopes: a public 403 has already become
+            // PmtilesAbsentException inside archiveFor.
             return archiveFor(scope, facing, true);
         }
     }
@@ -317,7 +433,15 @@ public final class PmtilesTileLoader implements AutoCloseable {
             // from getTile().
             archive = archiveFor(scope, facing);
             raw = archive.getTile(z, x, y);
+        } catch (PmtilesAbsentException e) {
+            return null; // no archive at all: the same answer as "no tile here"
         } catch (PmtilesArchive.PmtilesForbiddenException e) {
+            if (FacingStyle.PUBLIC_SCOPE.equals(scope)) {
+                // Opened fine earlier, 403 now: the bake deleted it mid-session.
+                // There is no signature to renew.
+                markAbsent(facing);
+                return null;
+            }
             // The presignature died mid-session (they last 24h and a JOSM session
             // can outlive that, especially across a laptop sleep). Re-sign once and
             // retry. This is now a real HTTP status rather than a substring match

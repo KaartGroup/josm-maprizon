@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package org.openstreetmap.josm.plugins.maprizon.gui;
 
+import org.openstreetmap.josm.gui.MainApplication;
 import org.openstreetmap.josm.gui.dialogs.ToggleDialog;
 import org.openstreetmap.josm.plugins.maprizon.FacingStyle;
 import org.openstreetmap.josm.plugins.maprizon.data.ImageryFeature;
@@ -45,8 +46,10 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseWheelEvent;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBuffer;
 import java.awt.image.RescaleOp;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -78,17 +81,19 @@ public final class MaprizonImageDialog extends ToggleDialog {
     /** Small LRU of decoded frames so walking back and forth is instant. */
     private static final int CACHE_MAX = 40;
 
+    /** ...bounded by decoded size as well as count. Flat frames are cached at full
+     * resolution (the panel zooms to 8x, so they cannot be shrunk like panoramas),
+     * and a 3840x2160 frame is ~25-33 MB decoded: 40 of them was about 1 GB. */
+    private static final long CACHE_MAX_BYTES = 256L * 1024 * 1024;
+
     /** Max width a cached panorama is decoded to — memory-vs-detail knob (source
      * equirectangular 360 frames can be very large; 40 uncapped ones would blow the
      * heap). Panoramas wider than this are downscaled on load. */
     private static final int MAX_PANO_WIDTH = 4096;
 
-    private final Map<String, BufferedImage> cache = new LinkedHashMap<String, BufferedImage>(64, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<String, BufferedImage> eldest) {
-            return size() > CACHE_MAX;
-        }
-    };
+    /** Access-ordered, so the eldest entry is the least recently shown. Guarded
+     * by itself; written only through {@link #cachePut}. */
+    private final Map<String, BufferedImage> cache = new LinkedHashMap<>(64, 0.75f, true);
 
     private final ImagePanel imagePanel = new ImagePanel();
     private final PanoramaPanel panoPanel = new PanoramaPanel();
@@ -120,7 +125,10 @@ public final class MaprizonImageDialog extends ToggleDialog {
     private List<ImageryFeature> frames = Collections.emptyList();
     private int index;
     /** Layer that originated the current selection, so we can move its on-map
-     * marker to the frame being shown as the user walks the sequence. */
+     * marker to the frame being shown as the user walks the sequence. Dropped by
+     * {@link #layerRemoved} and re-resolved by {@link #markerLayer()}: toggling the
+     * layer off and on with the panel open left this on the destroyed layer, so
+     * walking moved a marker nobody could see and kept the old data in memory. */
     private MaprizonLayer originatingLayer;
 
     /** Clears the image cache + reloads the current frame when login state flips,
@@ -301,12 +309,20 @@ public final class MaprizonImageDialog extends ToggleDialog {
             syncFacingButtons(current.getFacing());
             return;
         }
-        final MaprizonLayer layer = originatingLayer;
+        final MaprizonLayer layer = markerLayer();
+        // Not incremented: the swap only starts a load once it has an answer. But
+        // anything that does start one meanwhile (a map click, Prev/Next) is newer
+        // than this swap, and a slow answer must not replace it.
+        final long token = loadToken.get();
         status.setText("Switching camera…");
         exec.submit(() -> {
-            ImageryFeature match = ViewerApiClient.nearestFeature(current, targetFacing);
-            final String failure = ViewerApiClient.lastSwapFailure();
+            ViewerApiClient.SwapResult swap = ViewerApiClient.nearestFeature(current, targetFacing);
+            final ImageryFeature match = swap.feature;
+            final String failure = swap.failure;
             SwingUtilities.invokeLater(() -> {
+                if (token != loadToken.get()) {
+                    return;
+                }
                 if (match != null) {
                     List<double[]> pts = match.getPoints();
                     showForClickedFeature(match, pts.isEmpty() ? null : pts.get(0), layer);
@@ -331,6 +347,25 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
     public static MaprizonImageDialog getInstance() {
         return instance;
+    }
+
+    /** Called from {@link MaprizonLayer#destroy()}: let go of a layer that is gone. EDT. */
+    public void layerRemoved(MaprizonLayer layer) {
+        if (originatingLayer == layer) {
+            originatingLayer = null;
+        }
+    }
+
+    /** The layer to draw the selection marker on: the one the selection came from,
+     * or, once that has been removed, whichever Maprizon layer is open now. EDT. */
+    private MaprizonLayer markerLayer() {
+        if (originatingLayer == null) {
+            List<MaprizonLayer> open = MainApplication.getLayerManager().getLayersOfType(MaprizonLayer.class);
+            if (!open.isEmpty()) {
+                originatingLayer = open.get(0);
+            }
+        }
+        return originatingLayer;
     }
 
     /** On login/logout: drop cached bytes and re-fetch the shown frame (now with
@@ -585,8 +620,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
         boolean is360 = FacingStyle.FACING_360.equals(f.getFacing());
         // Move the on-map selection marker to the frame now being shown, and orient
         // its view cone by the frame's heading (ring for 360).
-        if (originatingLayer != null) {
-            originatingLayer.highlightFrame(f, coneBearing(frames, index), is360);
+        MaprizonLayer layer = markerLayer();
+        if (layer != null) {
+            layer.highlightFrame(f, coneBearing(frames, index), is360);
         }
         // ONE compact line now that this sits in the bar rather than above the image:
         // the facing is already shown by which button is lit, so it does not need
@@ -637,9 +673,7 @@ public final class MaprizonImageDialog extends ToggleDialog {
                     img = capPano(img); // bound cache memory for big equirectangular frames
                 }
                 if (img != null) {
-                    synchronized (cache) {
-                        cache.put(url, img);
-                    }
+                    cachePut(url, img);
                 }
                 final BufferedImage fimg = img;
                 final boolean loggedIn = ViewerAuth.getInstance().isLoggedIn();
@@ -667,6 +701,29 @@ public final class MaprizonImageDialog extends ToggleDialog {
         });
     }
 
+    /** Add a frame, then evict least-recently-shown frames until both caps hold.
+     * The newest frame always stays, however large. */
+    private void cachePut(String url, BufferedImage img) {
+        synchronized (cache) {
+            cache.put(url, img);
+            long bytes = 0;
+            for (BufferedImage b : cache.values()) {
+                bytes += decodedBytes(b);
+            }
+            java.util.Iterator<Map.Entry<String, BufferedImage>> it = cache.entrySet().iterator();
+            while (cache.size() > 1 && (cache.size() > CACHE_MAX || bytes > CACHE_MAX_BYTES)) {
+                Map.Entry<String, BufferedImage> eldest = it.next();
+                bytes -= decodedBytes(eldest.getValue());
+                it.remove();
+            }
+        }
+    }
+
+    private static long decodedBytes(BufferedImage img) {
+        DataBuffer db = img.getRaster().getDataBuffer();
+        return (long) db.getSize() * db.getNumBanks() * DataBuffer.getDataTypeSize(db.getDataType()) / 8;
+    }
+
     /** Route a decoded frame to the right viewer: the panorama panel for a real
      * equirectangular 360, else the flat image panel. EDT. */
     private void showLoaded(BufferedImage img, boolean is360) {
@@ -677,8 +734,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
             final double base = baseObj == null ? 0.0 : baseObj;
             panoPanel.setPanorama(img);
             panoPanel.setYawListener(yawDeg -> {
-                if (originatingLayer != null) {
-                    originatingLayer.setViewConeBearing(norm360(base + yawDeg));
+                MaprizonLayer layer = markerLayer();
+                if (layer != null) {
+                    layer.setViewConeBearing(norm360(base + yawDeg));
                 }
             });
             setHost(panoPanel);
@@ -705,10 +763,22 @@ public final class MaprizonImageDialog extends ToggleDialog {
 
     /** Downscale a panorama wider than {@link #MAX_PANO_WIDTH} (aspect-preserving)
      * so the frame cache can't exhaust the heap. Uses {@link #halveDownTo} rather
-     * than one big {@code drawImage} for the reason given there. */
+     * than one big {@code drawImage} for the reason given there.
+     *
+     * <p>Always returns {@code TYPE_INT_RGB}, converting here on the loader thread
+     * if need be: {@link PanoramaPanel#setPanorama} reads that type's pixel array
+     * directly, and otherwise copied the whole panorama (~32 MB at 4096 wide) on
+     * the EDT on every display, cache hits included. */
     private static BufferedImage capPano(BufferedImage src) {
         if (src.getWidth() <= MAX_PANO_WIDTH) {
-            return src;
+            if (src.getType() == BufferedImage.TYPE_INT_RGB) {
+                return src;
+            }
+            BufferedImage rgb = new BufferedImage(src.getWidth(), src.getHeight(), BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = rgb.createGraphics();
+            g.drawImage(src, 0, 0, null);
+            g.dispose();
+            return rgb;
         }
         int w = MAX_PANO_WIDTH;
         int h = (int) Math.round((double) src.getHeight() * MAX_PANO_WIDTH / src.getWidth());
@@ -772,9 +842,13 @@ public final class MaprizonImageDialog extends ToggleDialog {
                     .connect();
             if (res.getResponseCode() != 200) {
                 Logging.warn("Maprizon: image fetch HTTP " + res.getResponseCode() + " for " + redact(url));
+                ViewerApiClient.discardBody(res);
                 return null;
             }
-            return ImageIO.read(res.getContent());
+            // ImageIO.read(InputStream) does not close the stream it is given.
+            try (InputStream in = res.getContent()) {
+                return ImageIO.read(in);
+            }
         } catch (IOException | RuntimeException e) {
             Logging.warn("Maprizon: image fetch failed: " + redact(String.valueOf(e)));
             return null;
@@ -831,6 +905,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
      * of dropping back to fit on every step. */
     private static final class ImagePanel extends JPanel {
         private transient BufferedImage image;
+        /** Panel-sized scratch buffer for brightness/contrast, reused while the
+         * panel size is unchanged instead of allocated on every paint. */
+        private transient BufferedImage adjustBuf;
 
         /** Multiplier over the fit-to-panel scale; 1.0 = fitted (the floor). */
         private double zoom = 1.0;
@@ -1033,7 +1110,11 @@ public final class MaprizonImageDialog extends ToggleDialog {
                 // Filter a PANEL-SIZED buffer, never the source: at 8x zoom the drawn
                 // image is many times the panel, and only what is on screen needs
                 // adjusting. Keeps the cost flat however far in the user has zoomed.
-                BufferedImage buf = new BufferedImage(getWidth(), getHeight(), BufferedImage.TYPE_INT_RGB);
+                if (adjustBuf == null || adjustBuf.getWidth() != getWidth()
+                        || adjustBuf.getHeight() != getHeight()) {
+                    adjustBuf = new BufferedImage(getWidth(), getHeight(), BufferedImage.TYPE_INT_RGB);
+                }
+                BufferedImage buf = adjustBuf;
                 Graphics2D bg = buf.createGraphics();
                 bg.setColor(getBackground());
                 bg.fillRect(0, 0, getWidth(), getHeight());

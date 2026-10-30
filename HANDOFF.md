@@ -37,12 +37,12 @@ pattern) plus a live run in JOSM. Failures go to `<JOSM user data dir>/maprizon.
 
 ## How a release reaches users
 
-There are three distribution channels, and **they are not in sync today**:
+There are three distribution channels, and **each is updated separately** on every release:
 
 | Channel | What it serves now | How it is updated |
 |---|---|---|
 | Maprizon web app download link (`GET /backend/api/upload/uploader_downloads`, env var `MAPRIZON_JOSM_PLUGIN_URL` on the api; client fallback in viewer `client/src/config.js`) | `Maprizon.jar.zip` on the Kaart DigitalOcean Spaces CDN (`kaart.sfo3.cdn.digitaloceanspaces.com/Uploader/`) | Zip the jar, upload to Spaces, update the env var if the path changes. **DO Spaces access needed.** |
-| GitHub Releases (`releases/latest/download/Maprizon.jar`) | **v1.0.1 (2026-07-17) — 25 versions behind** | `gh release create vX.Y.Z Maprizon.jar` |
+| GitHub Releases (`releases/latest/download/Maprizon.jar`) | v1.0.28 (2026-10-29); `latest` verified to serve the 1.0.28 jar | `gh release create vX.Y.Z Maprizon.jar` |
 | Official JOSM plugin list (Preferences → Plugins) | **Not listed.** Verified against the live `PluginsSource` wiki page 2026-10-13. | See below. |
 
 Release steps:
@@ -69,8 +69,8 @@ JOSM wiki page `https://josm.openstreetmap.de/wiki/PluginsSource`, pointing at
 JOSM re-reads that page about every 10 minutes. `PluginsSource-edited.txt` in
 this repo is a **local draft** of that page with the Kaart entry added (it names
 Chris Gousset and Devin Markley, both of whom have left or are leaving — change
-the contact before submitting). It has **not** been submitted. Before submitting,
-cut a current GitHub release (step 4), or the list will serve 1.0.1. Editing the
+the contact before submitting). It has **not** been submitted. The list serves
+whatever GitHub's `latest` release is, so keep step 4 current. Editing the
 wiki needs a JOSM wiki (OSM) account. Tracked as an open card on the Trello board.
 
 ## Coupling to the Maprizon API
@@ -102,7 +102,7 @@ server-side switch.
 - No open PRs. All pushed branches (`feat/direction-of-travel-arrows`,
   `feat/obj-info-link-and-update-check`, `feature/shareable-image-links`,
   `fix/download-scope-overfetch`) are fully merged into `main` and can be ignored.
-- Not on the JOSM plugin list; GitHub "latest" release is stale (above).
+- Not on the JOSM plugin list (above).
 - `docs/COVERAGE_AVAILABILITY_PLAN.md` — "where is there imagery?" overview;
   plan only, not approved.
 - `docs/VIEWER_OSM_PLUGIN_PLAN.md` — longer-term two-way JOSM↔Maprizon bridge;

@@ -1,13 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <project name="Maprizon" default="dist" basedir=".">
 
-    <!-- enter the SVN commit message -->
-    <property name="commit.message" value="JOSM plugin for Maprizon street-level imagery coverage"/>
     <!-- the *lowest* JOSM version this plugin is compatible with / tested against -->
     <property name="plugin.main.version" value="19481"/>
     <!-- Plugin version: shown in the plugin manager and used by JOSM's external
          update check. BUMP THIS ON EVERY RELEASE (semantic versioning). -->
-    <property name="plugin.version" value="1.0.28"/>
+    <property name="plugin.version" value="1.0.29"/>
 
     <!-- Configure these properties (replace "..." accordingly).
          See https://josm.openstreetmap.de/wiki/DevelopersGuide/DevelopingPlugins
@@ -24,7 +22,6 @@
     <import file="build-common.xml"/>
 
     <property name="josm" location="lib/josm-custom.jar"/>
-    <property name="plugin.dist.dir" value="dist"/>
 
     <!-- classpath for compiling -->
     <path id="classpath">
@@ -46,7 +43,6 @@
 
     <target name="init">
         <mkdir dir="${plugin.build.dir}"/>
-        <mkdir dir="dist"/>
     </target>
 
     <target name="compile" depends="init">
@@ -107,7 +103,6 @@
     </target>
 
     <target name="clean" depends="clean-common">
-        <delete dir="${plugin.build.dir}"/>
         <delete file="${plugin.jar}"/>
     </target>
 
