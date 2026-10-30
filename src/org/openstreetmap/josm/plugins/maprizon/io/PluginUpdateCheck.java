@@ -239,7 +239,6 @@ public final class PluginUpdateCheck {
         if (latest.equals(alreadyTold)) {
             return; // same release, already announced in an earlier session
         }
-        Config.getPref().put(PREF_DISMISSED, latest);
 
         StringBuilder html = new StringBuilder("<html><b>Maprizon plugin update</b><br>");
         html.append("You are running ").append(MaprizonVersion.current())
@@ -255,12 +254,15 @@ public final class PluginUpdateCheck {
 
         SwingUtilities.invokeLater(() -> {
             if (MainApplication.getMainFrame() == null) {
-                return;
+                return; // not shown, so not recorded: the next session tries again
             }
             Notification n = new Notification(html.toString());
             n.setIcon(JOptionPane.INFORMATION_MESSAGE);
             n.setDuration(Notification.TIME_LONG);
             n.show();
+            // Recorded only once actually shown. Written before, a session with no
+            // main frame yet marked the version announced and it never was.
+            Config.getPref().put(PREF_DISMISSED, latest);
         });
     }
 
