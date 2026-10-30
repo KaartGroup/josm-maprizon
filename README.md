@@ -55,9 +55,11 @@ A **Maprizon** menu is added to the menu bar:
   exactly what failed.
 - **Maprizon Help** — a quick in-app guide.
 
-Facings are colour-coded: **front** white, **left** red, **right** green,
-**360** purple, **still** amber. Each can be shown/hidden from the layer's
-right-click menu.
+Facings are colour-coded to match the Maprizon app: **front** white, **left**
+red, **right** green, **360** purple, **still** orange. Each can be shown/hidden
+from the layer's right-click menu, which also switches to the app's
+colourblind-safe palette (left orange, right blue, 360 reddish purple, still
+yellow); the choice is remembered.
 
 Click a coverage track to open its image in the **Maprizon Image** panel; a cone
 on the map marks the camera direction. The control bar under the image walks the

@@ -33,7 +33,7 @@ public class ShowMaprizonHelpAction extends JosmAction {
             + "<i>Download Maprizon coverage (current view)</i> (<tt>Alt+Shift+D</tt>). "
             + "Coverage accumulates as you download more areas; a spinner shows while it loads.</li>"
             + "<li><b>Facings are colour-coded:</b> front = white, left = red, right = green, "
-            + "360 = purple.</li>"
+            + "360 = purple, still = orange. Right-click the layer for colourblind-safe colours.</li>"
             + "</ul>"
             + "<h3>Viewing images</h3>"
             + "<ul>"
