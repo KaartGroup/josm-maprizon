@@ -51,6 +51,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -270,8 +271,8 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * public {@code still} archive stops at z13 while the drive facings reach z16)
      * was hidden everywhere and permanently, and an area downloaded at a coarse
      * zoom went blank as soon as any other area was downloaded at a finer one.
-     * The replacement asks the precise question instead, per feature, against the
-     * tile ledger — see {@link #finerDataFetchedOver}.
+     * The replacement asks the precise question instead, per segment, against the
+     * tile ledger — see {@link #lodRuns}.
      */
 
     // Debounced auto-download (opt-in live mode). All EDT.
@@ -490,6 +491,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * gone. The follow-up download repaints the public half within a second.
      */
     private void onAuthChanged() {
+        loader.forgetFailures();
         boolean loggedIn = ViewerAuth.getInstance().isLoggedIn();
         if (loggedIn) {
             // Keep the features; force every tile to be re-probed under the new
@@ -610,7 +612,11 @@ public class MaprizonLayer extends Layer implements MouseListener {
         //
         // <p>Projecting once also makes five passes cheaper than the old three:
         // toScreen was previously re-run per pass, per feature.
+        //
+        // <p>Features whose bounding box misses the view are skipped before any
+        // projection: every repaint used to project every stored vertex.
         List<Drawn> drawn = new ArrayList<>();
+        double[] cull = cullBox(bbox);
         for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
             if (!enabledFacings.contains(entry.getKey())) {
                 continue;
@@ -618,10 +624,12 @@ public class MaprizonLayer extends Layer implements MouseListener {
             Color color = FacingStyle.colorFor(entry.getKey());
             float offsetPx = facingOffsetPx(entry.getKey(), scale);
             for (ImageryFeature feature : entry.getValue()) {
-                if (!lodVisible(feature)) {
+                if (!feature.intersects(cull[0], cull[1], cull[2], cull[3])) {
                     continue;
                 }
-                drawn.add(new Drawn(toScreen(mv, feature, offsetPx), color));
+                for (List<double[]> piece : lodPieces(feature)) {
+                    drawn.add(new Drawn(toScreen(mv, piece, offsetPx), color));
+                }
             }
         }
 
@@ -771,8 +779,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * unshifted projection. For a lone point (no direction) the offset is applied
      * horizontally so stacked single-image markers still fan out.
      */
-    private Point[] toScreen(MapView mv, ImageryFeature feature, float offsetPx) {
-        List<double[]> pts = feature.getPoints();
+    private Point[] toScreen(MapView mv, List<double[]> pts, float offsetPx) {
         Point[] base = new Point[pts.size()];
         for (int i = 0; i < pts.size(); i++) {
             double[] lonLat = pts.get(i);
@@ -816,6 +823,30 @@ public class MaprizonLayer extends Layer implements MouseListener {
     }
 
 
+
+    /** The view widened by a quarter on each side: a feature just outside it can
+     * still reach in by its ribbon offset, stroke and markers, and culling one
+     * too eagerly would clip lines at the window edge. {west, south, east, north}. */
+    private static double[] cullBox(Bounds view) {
+        double padLon = (view.getMaxLon() - view.getMinLon()) / 4;
+        double padLat = (view.getMaxLat() - view.getMinLat()) / 4;
+        return new double[]{view.getMinLon() - padLon, view.getMinLat() - padLat,
+                view.getMaxLon() + padLon, view.getMaxLat() + padLat};
+    }
+
+    /** The parts of a feature the level-of-detail filter draws, as vertex lists
+     * (see {@link #lodRuns}). Usually the whole feature or nothing. */
+    private List<List<double[]>> lodPieces(ImageryFeature f) {
+        int[][] runs = lodRuns(f);
+        if (runs == WHOLE) {
+            return Collections.singletonList(f.getPoints());
+        }
+        List<List<double[]>> pieces = new ArrayList<>(runs.length);
+        for (int[] r : runs) {
+            pieces.add(f.getPoints().subList(r[0], r[1] + 1));
+        }
+        return pieces;
+    }
 
     /** One feature, already projected to screen, with the colour of its facing —
      * so the z-ordered passes can draw it without re-projecting or re-looking-up. */
@@ -982,8 +1013,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
      */
     private Point highlightScreenPoint(MapView mv, float scale) {
         List<double[]> pts = lastNearestFeature.getPoints();
-        Point[] screen = toScreen(mv, lastNearestFeature,
-                facingOffsetPx(lastNearestFeature.getFacing(), scale));
+        Point[] screen = toScreen(mv, pts, facingOffsetPx(lastNearestFeature.getFacing(), scale));
         for (int i = 0; i < pts.size() && i < screen.length; i++) {
             if (pts.get(i) == lastNearestPoint) {
                 return screen[i];
@@ -1105,6 +1135,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         generation.incrementAndGet();
         loadedTileKeys.clear();
         emptyTileKeys.clear();
+        lodRunsCache.clear();
         lastAutoBounds = null;
         lastAutoLonSpan = -1;
         // Re-resolve the archive zoom range as well: it is latched after the first
@@ -1506,6 +1537,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
             addedByFacing.put(e.getKey(), added);
         }
         featuresByFacing = next;
+        lodRunsCache.clear();
         return addedByFacing;
     }
 
@@ -1689,19 +1721,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         double maxLat = b[3];
         List<ImageryFeature> kept = new ArrayList<>(features.size());
         for (ImageryFeature f : features) {
-            double fMinLon = Double.MAX_VALUE;
-            double fMaxLon = -Double.MAX_VALUE;
-            double fMinLat = Double.MAX_VALUE;
-            double fMaxLat = -Double.MAX_VALUE;
-            for (double[] p : f.getPoints()) {
-                fMinLon = Math.min(fMinLon, p[0]);
-                fMaxLon = Math.max(fMaxLon, p[0]);
-                fMinLat = Math.min(fMinLat, p[1]);
-                fMaxLat = Math.max(fMaxLat, p[1]);
-            }
-            boolean intersects = fMaxLon >= minLon && fMinLon <= maxLon
-                    && fMaxLat >= minLat && fMinLat <= maxLat;
-            if (intersects) {
+            if (f.intersects(minLon, minLat, maxLon, maxLat)) {
                 kept.add(f);
             }
         }
@@ -1800,26 +1820,91 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return (int) Math.round(Math.log(px * 360.0 / (lonSpan * 256.0)) / Math.log(2));
     }
 
+    /** {@link #lodRuns} answer for "draw the whole feature". */
+    private static final int[][] WHOLE = new int[0][];
+    /** {@link #lodRuns} answer for "draw none of it". */
+    private static final int[][] HIDDEN = new int[0][];
+
+    /** Per-feature {@link #lodRuns} results. Paint and click hit-testing used to
+     * redo the ledger walk for every feature on every repaint (every 120 ms while
+     * the spinner runs). Cleared in {@link #merge} and {@link #clearLedgers}, the
+     * only points where what is drawn can change. EDT only. */
+    private final Map<ImageryFeature, int[][]> lodRunsCache = new IdentityHashMap<>();
+
     /**
      * Level-of-detail paint filter. Every enabled facing renders at every zoom,
-     * except where a FINER request has already
-     * been fetched over that feature's own ground ({@link #finerDataFetchedOver}),
-     * so coarse overzoom geometry stops drawing beneath its full-resolution
-     * replacement — and nothing else is suppressed.
+     * except where a FINER request has already been fetched over the feature's
+     * own ground ({@link #finerDataFetchedOver}), so coarse overzoom geometry
+     * stops drawing beneath its full-resolution replacement — and nothing else is
+     * suppressed.
+     *
+     * <p>Decided PER SEGMENT, not per feature. A coarse feature is kept whole when
+     * it crosses a requested tile (see clipToTile), so one line can run kilometres
+     * past a refined area. Judging it by its first vertex, as this once did, hid
+     * all of it after a small refine over its start, and left it drawn over the
+     * fine data when the refine covered anything but its start. A segment is
+     * dropped only when both ends are refined; the rest draw.
+     *
+     * @return {@link #WHOLE}, {@link #HIDDEN}, or {start, endInclusive} vertex
+     *         index runs to draw
      */
-    private boolean lodVisible(ImageryFeature f) {
-        return !finerDataFetchedOver(f);
+    private int[][] lodRuns(ImageryFeature f) {
+        int[][] cached = lodRunsCache.get(f);
+        if (cached == null) {
+            cached = computeLodRuns(f);
+            lodRunsCache.put(f, cached);
+        }
+        return cached;
+    }
+
+    private int[][] computeLodRuns(ImageryFeature f) {
+        int requested = f.getRequestZoom();
+        List<double[]> pts = f.getPoints();
+        if (requested == ImageryFeature.NATIVE_ZOOM || pts.isEmpty()) {
+            return WHOLE; // API-sourced frames are never superseded by tiles
+        }
+        int n = pts.size();
+        boolean[] refined = new boolean[n];
+        int refinedCount = 0;
+        for (int i = 0; i < n; i++) {
+            refined[i] = finerDataFetchedOver(f.getFacing(), requested, pts.get(i));
+            if (refined[i]) {
+                refinedCount++;
+            }
+        }
+        if (refinedCount == 0) {
+            return WHOLE;
+        }
+        if (refinedCount == n) {
+            return HIDDEN;
+        }
+        // n >= 2 here. Runs of consecutive segments with at least one unrefined end.
+        List<int[]> runs = new ArrayList<>();
+        int start = -1;
+        for (int i = 0; i < n - 1; i++) {
+            boolean keep = !(refined[i] && refined[i + 1]);
+            if (keep && start < 0) {
+                start = i;
+            } else if (!keep && start >= 0) {
+                runs.add(new int[]{start, i});
+                start = -1;
+            }
+        }
+        if (start >= 0) {
+            runs.add(new int[]{start, n - 1});
+        }
+        return runs.toArray(new int[0][]);
     }
 
     /**
-     * Has a FINER request already been fetched over this feature's own ground?
-     * That, and only that, is when a coarse feature must stop drawing — its
+     * Has a FINER request already been fetched over this point? That, and only
+     * that, is when a coarse feature must stop drawing there — its
      * full-resolution replacement is present and the two would render on top of
      * each other (the ragged-zigzag report).
      *
      * <p>The test walks the tile grid at each zoom finer than the feature's
      * request zoom and asks the ledger whether that tile was fetched AND produced
-     * features. Exact, and it is exact in both directions:
+     * features. Per point it is exact in both directions:
      * <ul>
      *   <li>A z16 download whose tile had no z16 data resolves to a z15 ancestor.
      *       Its features are still the only thing covering that ground, and they
@@ -1833,22 +1918,14 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * tile that came back empty has nothing to replace the coarse geometry with,
      * and treating it as a replacement would erase real coverage.
      *
-     * <p>Cost is (archiveMax − requestZoom) hash lookups per feature — one or two
-     * in practice, since features are requested at the zoom being looked at.
+     * <p>Cost is (archiveMax − requestZoom) hash lookups per point — one or two
+     * in practice, since features are requested at the zoom being looked at — and
+     * {@link #lodRunsCache} pays it once per feature, not once per repaint.
      */
-    private boolean finerDataFetchedOver(ImageryFeature f) {
-        int requested = f.getRequestZoom();
-        if (requested == ImageryFeature.NATIVE_ZOOM) {
-            return false; // API-sourced frames are never superseded by tiles
-        }
-        List<double[]> pts = f.getPoints();
-        if (pts.isEmpty()) {
-            return false;
-        }
-        double[] p = pts.get(0);
+    private boolean finerDataFetchedOver(String facing, int requested, double[] p) {
         for (int z = requested + 1; z <= archiveMaxZoom(); z++) {
             int[] t = TileMath.lonLatToTile(p[0], p[1], z);
-            if (loadedTileKeys.contains(tileKey(f.getFacing(), z, t[0], t[1]))) {
+            if (loadedTileKeys.contains(tileKey(facing, z, t[0], t[1]))) {
                 return true;
             }
         }
@@ -2339,25 +2416,27 @@ public class MaprizonLayer extends Layer implements MouseListener {
         double[] bestPoint = null;
         double bestDistSq = Double.MAX_VALUE;
         double limitSq = SELECT_PIXEL_THRESHOLD * SELECT_PIXEL_THRESHOLD;
+        double[] cull = cullBox(mv.getRealBounds());
         for (Map.Entry<String, List<ImageryFeature>> entry : featuresByFacing.entrySet()) {
             if (!enabledFacings.contains(entry.getKey())) {
                 continue;
             }
             float offsetPx = facingOffsetPx(entry.getKey(), scale);
             for (ImageryFeature f : entry.getValue()) {
-                if (!lodVisible(f)) {
+                if (!f.intersects(cull[0], cull[1], cull[2], cull[3])) {
                     continue;
                 }
-                Point[] screen = toScreen(mv, f, offsetPx);
-                List<double[]> pts = f.getPoints();
-                for (int i = 0; i < screen.length && i < pts.size(); i++) {
-                    double dx = screen[i].x - clickPx.x;
-                    double dy = screen[i].y - clickPx.y;
-                    double distSq = dx * dx + dy * dy;
-                    if (distSq < bestDistSq) {
-                        bestDistSq = distSq;
-                        bestFeature = f;
-                        bestPoint = pts.get(i);
+                for (List<double[]> pts : lodPieces(f)) {
+                    Point[] screen = toScreen(mv, pts, offsetPx);
+                    for (int i = 0; i < screen.length && i < pts.size(); i++) {
+                        double dx = screen[i].x - clickPx.x;
+                        double dy = screen[i].y - clickPx.y;
+                        double distSq = dx * dx + dy * dy;
+                        if (distSq < bestDistSq) {
+                            bestDistSq = distSq;
+                            bestFeature = f;
+                            bestPoint = pts.get(i);
+                        }
                     }
                 }
             }

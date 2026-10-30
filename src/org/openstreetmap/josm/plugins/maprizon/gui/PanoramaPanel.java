@@ -37,6 +37,12 @@ public final class PanoramaPanel extends JPanel {
     private int[] srcPix;
     private int srcW;
     private int srcH;
+    /** The image {@link #srcPix} came from, so showing the same frame again (a
+     * cache hit) does not re-read it. */
+    private BufferedImage srcImage;
+    /** Render target, reused while the render size is unchanged: allocating one
+     * per paint meant one per drag frame. */
+    private BufferedImage frameBuf;
 
     private double yaw;         // degrees, 0 = source centre column
     private double pitch;       // degrees, + = look up, clamped
@@ -149,11 +155,17 @@ public final class PanoramaPanel extends JPanel {
         if (img == null) {
             srcPix = null;
             srcW = srcH = 0;
-        } else {
+        } else if (img != srcImage) {
             srcW = img.getWidth();
             srcH = img.getHeight();
-            srcPix = img.getRGB(0, 0, srcW, srcH, null, 0, srcW);
+            // A plain TYPE_INT_RGB image (what the dialog's capPano hands over) IS
+            // a row-major int[] of exactly this layout: read it in place. Anything
+            // else gets the copy.
+            srcPix = img.getType() == BufferedImage.TYPE_INT_RGB && img.getRaster().getParent() == null
+                    ? ((DataBufferInt) img.getRaster().getDataBuffer()).getData()
+                    : img.getRGB(0, 0, srcW, srcH, null, 0, srcW);
         }
+        srcImage = img;
         repaint();
     }
 
@@ -221,7 +233,10 @@ public final class PanoramaPanel extends JPanel {
         double cp = Math.cos(Math.toRadians(pitch));
         double sp = Math.sin(Math.toRadians(pitch));
 
-        BufferedImage out = new BufferedImage(rw, rh, BufferedImage.TYPE_INT_RGB);
+        if (frameBuf == null || frameBuf.getWidth() != rw || frameBuf.getHeight() != rh) {
+            frameBuf = new BufferedImage(rw, rh, BufferedImage.TYPE_INT_RGB);
+        }
+        BufferedImage out = frameBuf;
         int[] o = ((DataBufferInt) out.getRaster().getDataBuffer()).getData();
         double twoPi = 2 * Math.PI;
         int n = rw * rh;
