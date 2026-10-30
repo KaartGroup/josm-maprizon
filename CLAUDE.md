@@ -21,6 +21,11 @@ ant clean dist      # -> Maprizon.jar at the repo root
 ant install         # copies the jar into the local JOSM plugins dir (mac: ~/Library/JOSM/plugins)
 ```
 
+`compile` first runs `tools/CheckJosmRevision.java`, which fails the build when
+`lib/josm-custom.jar` is older than `plugin.main.version` — a stale local jar once
+had every build compiling against r19439 under a declared minimum of 19481.
+Re-fetching `josm-tested.jar` is the fix it prints.
+
 `dist` unpacks every jar in `lib/` except `josm-custom.jar` into `build/classes`
 and jars them in (no shade plugin under plain Ant) — JTS, mapbox-vector-tile,
 protobuf, slf4j, pmtiles-reader. Adding a runtime dependency means dropping the

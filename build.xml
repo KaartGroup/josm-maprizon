@@ -45,7 +45,17 @@
         <mkdir dir="${plugin.build.dir}"/>
     </target>
 
-    <target name="compile" depends="init">
+    <!-- Refuse to compile against a JOSM older than plugin.main.version: API
+         added in between could not be checked. See tools/CheckJosmRevision.java. -->
+    <target name="check-josm">
+        <exec executable="${java.home}/bin/java" failonerror="true">
+            <arg value="tools/CheckJosmRevision.java"/>
+            <arg value="${josm}"/>
+            <arg value="${plugin.main.version}"/>
+        </exec>
+    </target>
+
+    <target name="compile" depends="init,check-josm">
         <echo message="compiling sources for ${plugin.jar} ..."/>
         <javac srcdir="src" debug="true" destdir="${plugin.build.dir}" includeantruntime="false"
                encoding="UTF-8" release="17">
