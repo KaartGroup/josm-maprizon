@@ -25,6 +25,10 @@ JOSM, and browse the actual photos without leaving the editor.
 - **View cone** on the map showing the selected image's camera direction.
 - **Optional login** to view your organization's private imagery; everything
   public works with no account.
+- **Changeset source** — once you have viewed a Maprizon photo, JOSM's upload
+  dialog offers `Maprizon` as a source ("obtain from current layers").
+- **Open from the web** — JOSM's remote control gains a `/maprizon` command, so a
+  link can open JOSM at a specific Maprizon image.
 
 ## Requirements
 
@@ -32,12 +36,17 @@ JOSM, and browse the actual photos without leaving the editor.
 
 ## Install
 
-The plugin is not yet in JOSM's built-in plugin list. Download it from the
-Maprizon web app (the JOSM plugin download link), unzip it, and drop `Maprizon.jar` into your JOSM plugins
+In JOSM: **Preferences → Plugins**, search for **Maprizon**, tick it, and click
+**OK**. Updates come the same way (**Update plugins** on that tab).
+
+Or install by hand: download it from the Maprizon web app (the JOSM plugin
+download link), unzip it, and drop `Maprizon.jar` into your JOSM plugins
 directory (`~/Library/JOSM/plugins` on macOS, `~/.josm/plugins` on Linux,
-`%APPDATA%\JOSM\plugins` on Windows) and restart JOSM. JOSM only reads plugin
-jars at startup, so a restart is required after every update — the download
-notification prints the running version so you can confirm which jar is live.
+`%APPDATA%\JOSM\plugins` on Windows).
+
+Either way, restart JOSM: it only reads plugin jars at startup, so a restart is
+required after every update — the download notification prints the running
+version so you can confirm which jar is live.
 
 ## Usage
 
@@ -53,15 +62,22 @@ A **Maprizon** menu is added to the menu bar:
   exactly what failed.
 - **Maprizon Help** — a quick in-app guide.
 
-Facings are colour-coded: **front** white, **left** red, **right** green,
-**360** purple, **still** amber. Each can be shown/hidden from the layer's
-right-click menu.
+Facings are colour-coded to match the Maprizon app: **front** white, **left**
+red, **right** green, **360** purple, **still** orange. Each can be shown/hidden
+from the layer's right-click menu, which also switches to the app's
+colourblind-safe palette (left orange, right blue, 360 reddish purple, still
+yellow); the choice is remembered.
 
 Click a coverage track to open its image in the **Maprizon Image** panel; a cone
 on the map marks the camera direction. The control bar under the image walks the
 sequence, switches cameras, and (behind the ☀ button) adjusts brightness and
 contrast. To see private imagery, right-click the layer → **Log in to Maprizon**
 (optional; anonymous access covers all public data).
+
+With remote control enabled (Preferences → Remote Control),
+`http://127.0.0.1:8111/maprizon?lat=&lon=&sequence_id=&sequence_index=&facing=&trip_id=&upload_batch_id=`
+zooms JOSM to the spot, downloads coverage and opens that image — the same
+parameters as a Maprizon share link. `lat`/`lon` alone just zooms and downloads.
 
 ## Troubleshooting
 

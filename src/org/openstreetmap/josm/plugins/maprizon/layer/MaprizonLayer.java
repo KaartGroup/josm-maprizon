@@ -321,6 +321,10 @@ public class MaprizonLayer extends Layer implements MouseListener {
      * (panoramic) instead of a wedge. Set via {@link #highlightFrame}. */
     private Double coneBearingDeg;
     private boolean cone360;
+    /** True once any frame has been shown from this layer — the gate for
+     * {@link #getChangesetSourceTag}. Deliberately not reset by "Clear downloaded
+     * coverage": edits made from a photo already seen still came from it. EDT only. */
+    private boolean imageViewed;
 
     // --- rendering constants (Phase 1 styling: coverage was hairline-thin +
     // tiny dots, invisible except at max zoom; these make it legible). ---
@@ -744,28 +748,33 @@ public class MaprizonLayer extends Layer implements MouseListener {
         // 4. black point casings, then 5. facing-coloured points — last, so the
         // markers a click resolves to are never hidden under another drive's line.
         //
-        // <p>Every vertex is marked, exactly as before this pass order existed.
-        // Restricting markers to standalone image features was tried and reverted:
-        // it is a defensible claim about the data (a line's vertices are the
-        // decimated shape of the sequence path, and the images are the separate
-        // point features) but it is NOT a layering change, and in practice it
-        // deleted every marker that sits ON a line and left only the standalone
-        // points — which carry a horizontal ribbon offset (see toScreen) and so
-        // read as floating away from the geometry. The z-order was the bug; which
-        // vertices are marked is a separate question and not one to settle as a
-        // side effect of fixing it.
+        // <p>Only IMAGE features are marked — single-vertex features, the real
+        // photo positions. A line's vertices are the decimated shape of the
+        // sequence path: a dot there claimed an image where none exists, and
+        // clicking it could not open one (lines carry no img). Measured before
+        // changing it (testbed/PointVsLineProbe, 32 real z16 tiles over Cebu):
+        // every drive facing carries image points wherever it carries lines, so
+        // no facing loses its markers. Hit-testing (findNearest) is untouched, so
+        // what a click selects is exactly what it was.
+        //
+        // <p>History: this was tried in 1.0.15 and reverted in 1.0.16 because a
+        // lone point's ribbon offset is horizontal (see toScreen), so markers
+        // read as floating off their line on east–west roads. That offset is
+        // deliberately left as it is.
         if (rawZoom >= POINT_MIN_ZOOM) {
             int casingR = Math.round((POINT_RADIUS + 1) * scale);
             int pointR = Math.round(POINT_RADIUS * scale);
             g.setColor(Color.BLACK);
             for (Drawn d : drawn) {
-                for (Point p : d.screen) {
+                if (d.screen.length == 1) {
+                    Point p = d.screen[0];
                     g.fillOval(p.x - casingR, p.y - casingR, 2 * casingR, 2 * casingR);
                 }
             }
             for (Drawn d : drawn) {
-                g.setColor(d.color);
-                for (Point p : d.screen) {
+                if (d.screen.length == 1) {
+                    Point p = d.screen[0];
+                    g.setColor(d.color);
                     g.fillOval(p.x - pointR, p.y - pointR, 2 * pointR, 2 * pointR);
                 }
             }
@@ -1079,6 +1088,7 @@ public class MaprizonLayer extends Layer implements MouseListener {
         lastNearestPoint = frame.getPoints().get(0);
         coneBearingDeg = bearingDeg;
         cone360 = is360;
+        imageViewed = true;
         invalidate();
     }
 
@@ -2601,6 +2611,20 @@ public class MaprizonLayer extends Layer implements MouseListener {
         return panel;
     }
 
+    /**
+     * "Maprizon" for the changeset {@code source} tag, once a photo has actually been
+     * opened from this layer. JOSM's upload dialog collects this from visible layers
+     * only, and only when the mapper clicks "obtain from current layers" or has
+     * auto-obtain on ({@code MapView.getLayerInformationForSourceTag}) — so this
+     * never writes a tag on its own. Coverage lines alone are not a source: until a
+     * photo is viewed, nothing was mapped from Maprizon, and claiming otherwise would
+     * inflate the attribution (Mapillary likewise tags only after images were viewed).
+     */
+    @Override
+    public String getChangesetSourceTag() {
+        return imageViewed ? "Maprizon" : null;
+    }
+
     @Override
     public String getToolTipText() {
         int total = featuresByFacing.values().stream().mapToInt(List::size).sum();
@@ -2703,6 +2727,16 @@ public class MaprizonLayer extends Layer implements MouseListener {
                 }
             });
         }
+        // The app's colourblind palette (Okabe–Ito). JOSM has no colourblind
+        // setting of its own, so the choice lives here; see FacingStyle.
+        actions.add(new AbstractAction(FacingStyle.isColorBlind()
+                ? "Use standard facing colours" : "Use colourblind-safe facing colours") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                FacingStyle.setColorBlind(!FacingStyle.isColorBlind());
+                invalidate();
+            }
+        });
         actions.add(Layer.SeparatorLayerAction.INSTANCE);
         // Say what the link will actually DO before it opens a browser. The deep
         // link carries no credentials, so what the recipient sees depends entirely

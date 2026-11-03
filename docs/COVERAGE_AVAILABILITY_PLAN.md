@@ -1,7 +1,7 @@
 # Coverage Availability — implementation plan
 
 > **Created**: 2026-07-29
-> **Status**: Plan, not yet approved
+> **Status**: Track A (plugin only, from archive directories) implemented in PR #16, merged 2026-11-03. Tracks needing `tile-baker/` and `server/flaskr/` not started.
 > **Spans**: `josm-maprizon/` (plugin) and `viewer-2-0/` (`tile-baker/`, `server/flaskr/`)
 
 ## The problem

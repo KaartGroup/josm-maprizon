@@ -121,6 +121,9 @@ public final class MaprizonImageDialog extends ToggleDialog {
         return t;
     });
     private final AtomicLong loadToken = new AtomicLong();
+    /** Bumped by every camera swap. A swap answer applies only if it is the
+     * LATEST swap asked for; see {@link #swapFacing}. */
+    private final AtomicLong swapToken = new AtomicLong();
 
     private List<ImageryFeature> frames = Collections.emptyList();
     private int index;
@@ -305,23 +308,34 @@ public final class MaprizonImageDialog extends ToggleDialog {
             return;
         }
         final ImageryFeature current = frames.get(index);
+        // Counted BEFORE the "already on this camera" return: clicking the camera
+        // you are on is still the newest choice, and must cancel a switch still
+        // in flight (Right, then back to Left while Right is pending, has to stay
+        // on Left). Measured in real JOSM: without this, 1 in 4 such sequences
+        // ended on the older click.
+        final long swap = swapToken.incrementAndGet();
         if (targetFacing.equalsIgnoreCase(current.getFacing())) {
             syncFacingButtons(current.getFacing());
             return;
         }
         final MaprizonLayer layer = markerLayer();
-        // Not incremented: the swap only starts a load once it has an answer. But
-        // anything that does start one meanwhile (a map click, Prev/Next) is newer
-        // than this swap, and a slow answer must not replace it.
+        // loadToken is NOT incremented: the swap only starts a load once it has an
+        // answer, and bumping it here would cancel the current frame's own load —
+        // a swap to a camera that turns out not to exist would then leave that
+        // frame never arriving. But anything that does start a load meanwhile (a
+        // map click, Prev/Next) is newer than this swap, and a slow answer must
+        // not replace it. Swaps get their OWN counter as well: two quick swaps
+        // (Left, then Right) shared one loadToken, so whichever answer landed
+        // first won — usually the OLDER click — and the newer one was dropped.
         final long token = loadToken.get();
         status.setText("Switching camera…");
         exec.submit(() -> {
-            ViewerApiClient.SwapResult swap = ViewerApiClient.nearestFeature(current, targetFacing);
-            final ImageryFeature match = swap.feature;
-            final String failure = swap.failure;
+            ViewerApiClient.SwapResult result = ViewerApiClient.nearestFeature(current, targetFacing);
+            final ImageryFeature match = result.feature;
+            final String failure = result.failure;
             SwingUtilities.invokeLater(() -> {
-                if (token != loadToken.get()) {
-                    return;
+                if (token != loadToken.get() || swap != swapToken.get()) {
+                    return; // a newer load or a newer swap owns the panel now
                 }
                 if (match != null) {
                     List<double[]> pts = match.getPoints();

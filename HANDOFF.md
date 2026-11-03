@@ -14,8 +14,8 @@ works with no account; an optional Auth0 login adds the user's organization's
 private imagery. Repo is **public**: `github.com/KaartGroup/josm-maprizon`,
 default branch `main`. License GPL-2.0-or-later.
 
-Current version: **1.0.28** (`build.xml` / `plugin.properties`, the `Release 1.0.28`
-commit, 2026-10-29). 1.0.23–1.0.25 were local builds that never shipped.
+Current version: **1.0.30** (`build.xml` / `plugin.properties`, the `Release 1.0.30`
+commit, 2026-10-30). 1.0.23–1.0.25 were local builds that never shipped.
 
 ## Build, run, test from a clean machine
 
@@ -27,8 +27,9 @@ ant clean dist      # -> Maprizon.jar at the repo root (gitignored)
 ant install         # copies it into the local JOSM plugins dir
 ```
 
-Verified 2026-10-29 (JDK 21, `release="17"`): builds clean, manifest says
-`Plugin-Version: 1.0.28`, `Plugin-Mainversion: 19481`, classes are Java 17 bytecode.
+Verified 2026-10-30 (JDK 21, `release="17"`, compile jar JOSM r19613 — the build
+refuses anything older than `plugin.main.version`): builds clean, manifest says
+`Plugin-Version: 1.0.30`, `Plugin-Mainversion: 19481`, classes are Java 17 bytecode.
 
 Restart JOSM after every install (it reads plugin jars only at startup). There
 are **no unit tests and no CI** — verification is throwaway probes in `testbed/`
@@ -42,8 +43,8 @@ There are three distribution channels, and **each is updated separately** on eve
 | Channel | What it serves now | How it is updated |
 |---|---|---|
 | Maprizon web app download link (`GET /backend/api/upload/uploader_downloads`, env var `MAPRIZON_JOSM_PLUGIN_URL` on the api; client fallback in viewer `client/src/config.js`) | `Maprizon.jar.zip` on the Kaart DigitalOcean Spaces CDN (`kaart.sfo3.cdn.digitaloceanspaces.com/Uploader/`) | Zip the jar, upload to Spaces, update the env var if the path changes. **DO Spaces access needed.** |
-| GitHub Releases (`releases/latest/download/Maprizon.jar`) | v1.0.28 (2026-10-29); `latest` verified to serve the 1.0.28 jar | `gh release create vX.Y.Z Maprizon.jar` |
-| Official JOSM plugin list (Preferences → Plugins) | **Not listed.** Verified against the live `PluginsSource` wiki page 2026-10-13. | See below. |
+| GitHub Releases (`releases/latest/download/Maprizon.jar`) | v1.0.29 (2026-10-29); JOSM's plugin list verified 2026-10-30 to serve 1.0.29 from it | `gh release create vX.Y.Z Maprizon.jar` |
+| Official JOSM plugin list (Preferences → Plugins) | **Listed** — the GitHub `latest` jar. Verified 2026-10-30: `PluginsSource` has a "by Kaart" entry and `josm.openstreetmap.de/plugin` serves the 1.0.29 manifest. | Automatic: JOSM re-reads the wiki page and follows GitHub `latest`. |
 
 Release steps:
 
@@ -54,24 +55,27 @@ Release steps:
 3. Commit as `Release X.Y.Z`; push to `main`.
 4. Publish the jar: upload `Maprizon.jar.zip` to Spaces (what the web app hands
    out) **and** create a GitHub release with `Maprizon.jar` attached (what the
-   JOSM plugin list would point at).
+   JOSM plugin list points at — it goes live to JOSM users as soon as it is
+   `latest`).
 5. Raise `JOSM_MAPRIZON_VERSION` on the api (DigitalOcean App Platform env var).
    The in-plugin update check (`io/PluginUpdateCheck`) calls
    `POST /backend/api/upload/check_uploader_version` with
    `product: "josm-maprizon"` and only nags when the server's number is newer.
-   Live 2026-10-13 the server answers `status: ok` for 1.0.26.
+   Measured 2026-10-30: the server still held **1.0.26**, so no JOSM user had been
+   told about 1.0.27–1.0.29. The server's check is an exact match
+   (`server/flaskr/views/Upload.py`: `user_version != uploader_version`), so it
+   also tells any NEWER build it is "out of date"; the plugin ignores that
+   (`compare(running, latest) >= 0`), the desktop uploader does not.
 
-### Getting onto the official JOSM plugin list
+### The official JOSM plugin list
 
-Plan: the "external plugin" route — add one line under a Kaart heading to the
-JOSM wiki page `https://josm.openstreetmap.de/wiki/PluginsSource`, pointing at
+Listed via the "external plugin" route: a "by Kaart" entry on the JOSM wiki page
+`https://josm.openstreetmap.de/wiki/PluginsSource` (contact dev@kaart.com)
+points at
 `https://github.com/KaartGroup/josm-maprizon/releases/latest/download/Maprizon.jar`.
-JOSM re-reads that page about every 10 minutes. `PluginsSource-edited.txt` in
-this repo is a **local draft** of that page with the Kaart entry added (it names
-Chris Gousset and Devin Markley, both of whom have left or are leaving — change
-the contact before submitting). It has **not** been submitted. The list serves
-whatever GitHub's `latest` release is, so keep step 4 current. Editing the
-wiki needs a JOSM wiki (OSM) account. Tracked as an open card on the Trello board.
+JOSM re-reads that page about every 10 minutes, so a GitHub release reaches the
+list as soon as it is `latest` — cut releases deliberately. Changing the entry
+(contact, URL) needs a JOSM wiki (OSM) account.
 
 ## Coupling to the Maprizon API
 
@@ -99,10 +103,10 @@ server-side switch.
 
 ## In flight / known gaps
 
-- No open PRs. All pushed branches (`feat/direction-of-travel-arrows`,
-  `feat/obj-info-link-and-update-check`, `feature/shareable-image-links`,
-  `fix/download-scope-overfetch`) are fully merged into `main` and can be ignored.
-- Not on the JOSM plugin list (above).
+- Open PRs: see `gh pr list` (a snapshot here goes stale). Old pushed branches
+  (`feat/direction-of-travel-arrows`, `feat/obj-info-link-and-update-check`,
+  `feature/shareable-image-links`, `fix/download-scope-overfetch`) are fully
+  merged into `main` and can be ignored.
 - `docs/COVERAGE_AVAILABILITY_PLAN.md` — "where is there imagery?" overview;
   plan only, not approved.
 - `docs/VIEWER_OSM_PLUGIN_PLAN.md` — longer-term two-way JOSM↔Maprizon bridge;
@@ -116,6 +120,6 @@ server-side switch.
   `MAPRIZON_JOSM_PLUGIN_URL` on the api.
 - **Auth0** — admin on tenant `dev-p6r3cciondp4has2` to manage the plugin's
   native application (callback URLs, offline access).
-- **JOSM wiki / OSM account** — to edit `PluginsSource` (none is set up for Kaart yet).
+- **JOSM wiki / OSM account** — to change the Kaart entry on `PluginsSource`.
 - **Trello** — the Maprizon/JOSM Plugin board, https://trello.com/b/FSwceNHE.
 - `testbed/` probes live only on Chris's machine; ask for a copy if you want them.

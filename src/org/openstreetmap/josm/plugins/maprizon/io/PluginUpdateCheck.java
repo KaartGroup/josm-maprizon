@@ -23,11 +23,13 @@ import java.nio.charset.StandardCharsets;
  * Asks Maprizon whether a newer plugin build exists, and says so once per
  * session if one does.
  *
- * <p><b>Why the plugin has to ask at all.</b> JOSM updates plugins from its own
- * plugin directory, and this plugin is not listed there yet — installation is by
- * hand, so JOSM has nothing to compare against and users sit on whatever jar
- * they copied in months ago. Until the listing lands, the only way a user learns
- * a new build exists is if we tell them.
+ * <p><b>Why the plugin still asks.</b> It IS in JOSM's plugin list (the "by
+ * Kaart" entry on the PluginsSource wiki page, which serves the latest GitHub
+ * release), so JOSM can update it. But JOSM's own time-based plugin check runs
+ * every 30 days by default ({@code pluginmanager.time-based-update.interval},
+ * read from r19613), and only offers to update when it does. This check runs at
+ * every startup, so a user hears about a release as soon as the api's version
+ * gate ({@code JOSM_MAPRIZON_VERSION}) is raised, not up to a month later.
  *
  * <p><b>Advisory, never a gate.</b> The uploader's equivalent check can hard-block
  * with HTTP 426, because uploading a bad file to a shared dataset is worth
@@ -249,7 +251,7 @@ public final class PluginUpdateCheck {
         if (downloadUrl != null && !downloadUrl.isEmpty()) {
             html.append("Download: ").append(escape(downloadUrl)).append("<br>");
         }
-        html.append("Copy the jar into your JOSM plugins folder and restart JOSM.")
+        html.append("Update it in Preferences \u2192 Plugins \u2192 Update plugins, then restart JOSM.")
             .append("</html>");
 
         SwingUtilities.invokeLater(() -> {
