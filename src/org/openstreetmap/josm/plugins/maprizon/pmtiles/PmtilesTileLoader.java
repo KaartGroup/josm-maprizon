@@ -396,6 +396,55 @@ public final class PmtilesTileLoader implements AutoCloseable {
         return false;
     }
 
+    /**
+     * Ids of every tile at zoom {@code <= maxZoom} that this facing holds in ANY
+     * current scope — the union, for the same reason {@link #currentScopes} is one.
+     * Reads directories only, never a tile. A scope that fails is skipped and
+     * logged, so an unsignable org bake (or a public archive gone 403) cannot hide
+     * the other scope's availability; only if every scope fails does it throw.
+     * Blocking — call OFF the EDT.
+     */
+    public long[] availableTileIds(String facing, int maxZoom, int maxIds) throws IOException {
+        long limit = TileId.base(maxZoom + 1);
+        java.util.TreeSet<Long> union = new java.util.TreeSet<>();
+        IOException last = null;
+        boolean anyScope = false;
+        for (String scope : currentScopes()) {
+            try {
+                long[] ids;
+                try {
+                    ids = openArchive(scope, facing).tileIdsBelow(limit, maxIds);
+                } catch (PmtilesArchive.PmtilesForbiddenException e) {
+                    // A leaf read can 403 after open() succeeded (signature died
+                    // in between): re-sign once, as loadTileOrNull does.
+                    ids = archiveFor(scope, facing, true).tileIdsBelow(limit, maxIds);
+                }
+                if (ids.length >= maxIds) {
+                    MaprizonLog.warn("availability: " + scope + "/" + facing
+                            + " hit the " + maxIds + "-tile cap at z<=" + maxZoom + "; overview is partial");
+                }
+                for (long id : ids) {
+                    union.add(id);
+                }
+                anyScope = true;
+            } catch (PmtilesAbsentException e) {
+                anyScope = true; // no archive: an answer (nothing here), not a failure
+            } catch (IOException e) {
+                MaprizonLog.warn("availability: " + scope + "/" + facing + " unreadable: " + e.getMessage());
+                last = e;
+            }
+        }
+        if (!anyScope) {
+            throw last != null ? last : new IOException("no readable archive for " + facing);
+        }
+        long[] out = new long[union.size()];
+        int i = 0;
+        for (long id : union) {
+            out[i++] = id;
+        }
+        return out;
+    }
+
     /** Open (or reuse) one scope's archive, re-signing once if its signature died. */
     private PmtilesArchive openArchive(String scope, String facing) throws IOException {
         try {

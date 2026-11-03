@@ -66,6 +66,12 @@ public final class FacingStyle {
         COLORBLIND.put(STILL, new Color(0xF0, 0xE4, 0x42));
     }
 
+    /** The "imagery available here" overview cells. One colour for every facing on
+     * purpose — the overview answers "is there imagery here at all", and five tints
+     * stacked in one cell would read as noise. Cyan, because it is none of the
+     * facing colours in either palette. */
+    public static final Color AVAILABILITY = new Color(0x00, 0xB4, 0xD8);
+
     /** JOSM preference holding the palette choice. A display setting, so it is
      * kept across sessions, as the app keeps its colourblind theme. */
     private static final String PREF_COLORBLIND = "maprizon.colorblind";
