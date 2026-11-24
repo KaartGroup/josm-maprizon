@@ -16,7 +16,7 @@ default branch `main`. License GPL-2.0-or-later.
 
 Current version: **1.0.31** (`build.xml` / `plugin.properties`, PR #24 squash `4751c48`,
 2026-11-24: image loads skip frames stepped past, and drop bytes that finish after a
-login change). 1.0.30 is the last version on GitHub Releases. 1.0.23–1.0.25 were local builds that never shipped.
+login change). v1.0.31 is on GitHub Releases (2026-11-24). 1.0.23–1.0.25 were local builds that never shipped.
 
 ## Build, run, test from a clean machine
 
@@ -44,7 +44,7 @@ There are three distribution channels, and **each is updated separately** on eve
 | Channel | What it serves now | How it is updated |
 |---|---|---|
 | Maprizon web app download link (`GET /backend/api/upload/uploader_downloads`, env var `MAPRIZON_JOSM_PLUGIN_URL` on the api; client fallback in viewer `client/src/config.js`) | `Maprizon.jar.zip` on the Kaart DigitalOcean Spaces CDN (`kaart.sfo3.cdn.digitaloceanspaces.com/Uploader/`) | Zip the jar, upload to Spaces, update the env var if the path changes. **DO Spaces access needed.** |
-| GitHub Releases (`releases/latest/download/Maprizon.jar`) | v1.0.29 (2026-10-29); JOSM's plugin list verified 2026-10-30 to serve 1.0.29 from it | `gh release create vX.Y.Z Maprizon.jar` |
+| GitHub Releases (`releases/latest/download/Maprizon.jar`) | v1.0.31 (2026-11-24, `latest`, asset `Maprizon.jar`, 2,580,104 bytes); the plugin-list check below was last verified 2026-10-30 against 1.0.29 | `gh release create vX.Y.Z Maprizon.jar` |
 | Official JOSM plugin list (Preferences → Plugins) | **Listed** — the GitHub `latest` jar. Verified 2026-10-30: `PluginsSource` has a "by Kaart" entry and `josm.openstreetmap.de/plugin` serves the 1.0.29 manifest. | Automatic: JOSM re-reads the wiki page and follows GitHub `latest`. |
 
 Release steps:
