@@ -121,6 +121,10 @@ public final class MaprizonImageDialog extends ToggleDialog {
         return t;
     });
     private final AtomicLong loadToken = new AtomicLong();
+    /** Bumped on every login or logout. A download notes it when it starts; if it
+     * has moved by the time the bytes arrive, they belong to the previous session
+     * and are neither cached nor shown (a private photo must not outlive a logout). */
+    private final AtomicLong loginEpoch = new AtomicLong();
     /** Bumped by every camera swap. A swap answer applies only if it is the
      * LATEST swap asked for; see {@link #swapFacing}. */
     private final AtomicLong swapToken = new AtomicLong();
@@ -385,6 +389,7 @@ public final class MaprizonImageDialog extends ToggleDialog {
     /** On login/logout: drop cached bytes and re-fetch the shown frame (now with
      * or without signing). Safe to call from any thread. */
     private void onLoginStateChanged() {
+        loginEpoch.incrementAndGet();
         synchronized (cache) {
             cache.clear();
         }
@@ -676,15 +681,30 @@ public final class MaprizonImageDialog extends ToggleDialog {
             showLoaded(cached, is360);
             return;
         }
+        final long epoch = loginEpoch.get();
         exec.submit(() -> {
             try {
+                // Holding the arrow key queues a task per step (about 30 a second).
+                // Only the frame the user is now on is worth a download, so a task
+                // that has been overtaken stops before it signs or fetches anything.
+                if (token != loadToken.get()) {
+                    return;
+                }
                 // Resolve the raw (stored) URL to fetchable bytes: signed when logged
                 // in (private + public), raw otherwise. Cache stays keyed by the raw
                 // URL so it survives signed-URL expiry.
                 String fetchUrl = ViewerApiClient.resolveImageUrl(url);
+                if (token != loadToken.get() || epoch != loginEpoch.get()) {
+                    return;
+                }
                 BufferedImage img = fetch(fetchUrl);
                 if (img != null && is360) {
                     img = capPano(img); // bound cache memory for big equirectangular frames
+                }
+                if (epoch != loginEpoch.get()) {
+                    // Logged in or out while this was downloading: the bytes are the
+                    // old session's. Drop them; the login change already re-displays.
+                    return;
                 }
                 if (img != null) {
                     cachePut(url, img);
